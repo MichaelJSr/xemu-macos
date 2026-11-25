@@ -99,11 +99,14 @@ enum class MetalUpscaleFilter {
 // Game-frame upscale into the current main drawable pass: gamma at native
 // resolution, the chosen scaler to the on-screen size, then RCAS. Returns
 // false when it does not apply (no upscaling needed), in which case the
-// caller should fall back to MetalRenderFramebuffer.
+// caller should fall back to MetalRenderFramebuffer. The first pass reads
+// `tex` once wait_event (id<MTLSharedEvent>, may be NULL) reaches
+// wait_value, the pair the present command buffer waits on.
 bool MetalRenderFramebufferUpscaled(uintptr_t tex, int width, int height,
                                     bool flip, const float scale[2],
                                     MetalUpscaleFilter filter,
-                                    float sharpness);
+                                    float sharpness, void *wait_event,
+                                    uint64_t wait_value);
 
 // Render `tex` through the gamma blit into an offscreen target of the
 // given size and read back tightly-packed RGB8. Synchronous (used for

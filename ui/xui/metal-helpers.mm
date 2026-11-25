@@ -42,6 +42,30 @@ extern "C" {
 // Shader source
 // ---------------------------------------------------------------------------
 
+// fsr_easu_fs and fsr_rcas_fs below are derived from AMD FidelityFX Super
+// Resolution 1.0 (ffx_fsr1.h), under AMD's MIT license:
+//
+// Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 static NSString *const kShaderSource = @R"MSL(
 #include <metal_stdlib>
 using namespace metal;
@@ -134,9 +158,10 @@ fragment float4 gamma_fs(VSOut in [[stage_in]],
 
 // Upscaling filters (ports of the GLSL in gl-helpers.cc): FSR 1 EASU and
 // RCAS (from ffx_fsr1.h, (c) 2021 Advanced Micro Devices, Inc., MIT
-// License), Lanczos-3, and Catmull-Rom bicubic. Taps are read with
-// texture.read() rather than sampled, so they line up with the integer
-// texel grid exactly as the GLSL texelFetch versions do.
+// License: notice above kShaderSource), Lanczos-3, and Catmull-Rom
+// bicubic. Taps are read with texture.read() rather than sampled, so they
+// line up with the integer texel grid exactly as the GLSL texelFetch
+// versions do.
 struct ScalerUniforms {
     float2 in_size;
     float2 out_size;
@@ -907,7 +932,11 @@ uintptr_t MetalFboTexture(MetalFbo *fbo)
     return (uintptr_t)fbo->tex;
 }
 
-void MetalFboTarget(MetalFbo *fbo)
+// With a wait_event, the pass runs only once the event reaches wait_value:
+// a pass that samples a present frame waits for its producer first, as
+// the present command buffer does (xemu_metal_begin_frame).
+static void fbo_target_wait(MetalFbo *fbo, void *wait_event,
+                            uint64_t wait_value)
 {
     assert(g_current_fbo == NULL && "nested Fbo targets unsupported");
 
@@ -921,6 +950,11 @@ void MetalFboTarget(MetalFbo *fbo)
     fbo->cmdbuf = [[queue commandBuffer] retain];
     xemu_metal_watch_command_buffer(fbo->cmdbuf, "xemu HUD target");
 
+    if (wait_event && wait_value) {
+        [fbo->cmdbuf encodeWaitForEvent:(id<MTLSharedEvent>)wait_event
+                                  value:wait_value];
+    }
+
     MTLRenderPassDescriptor *rpd =
         [MTLRenderPassDescriptor renderPassDescriptor];
     rpd.colorAttachments[0].texture = fbo->tex;
@@ -931,6 +965,11 @@ void MetalFboTarget(MetalFbo *fbo)
     fbo->encoder =
         [[fbo->cmdbuf renderCommandEncoderWithDescriptor:rpd] retain];
     g_current_fbo = fbo;
+}
+
+void MetalFboTarget(MetalFbo *fbo)
+{
+    fbo_target_wait(fbo, NULL, 0);
 }
 
 void MetalFboRestore(MetalFbo *fbo)
@@ -1172,7 +1211,8 @@ static MetalFbo *ensure_fbo(MetalFbo *fbo, int w, int h)
 
 bool MetalRenderFramebufferUpscaled(uintptr_t tex, int width, int height,
                                     bool flip, const float scale[2],
-                                    MetalUpscaleFilter filter, float sharpness)
+                                    MetalUpscaleFilter filter, float sharpness,
+                                    void *wait_event, uint64_t wait_value)
 {
     if (nv2a_get_screen_off()) {
         return true; // pass was cleared at begin_frame
@@ -1205,8 +1245,11 @@ bool MetalRenderFramebufferUpscaled(uintptr_t tex, int width, int height,
 
     // Pass 1: DAC gamma + orientation at native resolution, into a target
     // whose row 0 is the scene bottom (the FBO flip_ndc convention), so the
-    // scaler reads it exactly as the GL path does.
-    MetalFboTarget(g_upscale_gamma_fbo);
+    // scaler reads it exactly as the GL path does. It samples the frame
+    // and commits before the present command buffer, so it waits for the
+    // frame's producer itself. Passes 2 and 3 read only targets this queue
+    // wrote.
+    fbo_target_wait(g_upscale_gamma_fbo, wait_event, wait_value);
     {
         int w, h;
         bool flip_ndc;

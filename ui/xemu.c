@@ -656,12 +656,28 @@ static void handle_mousewheel(SDL_Event *ev)
  */
 static bool focus_loss_paused;
 
+/* Any start (menu, QMP, a frame advance) ends this feature's pause. */
+static void focus_loss_vm_state_change(void *opaque, bool running,
+                                       RunState state)
+{
+    if (running) {
+        focus_loss_paused = false;
+    }
+}
+
 static void xemu_focus_loss_pause(void)
 {
+    static bool state_handler;
+
     if (!g_config.display.ui.pause_on_focus_loss || focus_loss_paused) {
         return;
     }
     if (runstate_is_running()) {
+        if (!state_handler) {
+            qemu_add_vm_change_state_handler(focus_loss_vm_state_change,
+                                             NULL);
+            state_handler = true;
+        }
         vm_stop(RUN_STATE_PAUSED);
         focus_loss_paused = true;
     }

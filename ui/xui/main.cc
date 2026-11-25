@@ -60,7 +60,6 @@ extern "C" {
 #include "ui/xemu-present.h"
 #include "ui/xemu-metal.h"
 }
-#include <mach/mach.h>
 #include <sys/resource.h>
 #include <time.h>
 #include <IOKit/IOKitLib.h>
@@ -236,7 +235,8 @@ void xemu_hud_update(void)
     if (!first_boot_window.is_open) {
         int ww, wh;
         SDL_GetWindowSizeInPixels(xemu_get_window(), &ww, &wh);
-        RenderFramebuffer(g_tex, ww, wh, g_flip_req);
+        RenderFramebuffer(g_tex, ww, wh, g_flip_req, g_tex_wait_event,
+                          g_tex_wait_value);
     }
 
 #ifdef __APPLE__
@@ -373,7 +373,7 @@ static double macos_gpu_utilization(void)
     io_iterator_t iter;
     if (IOServiceGetMatchingServices(kIOMainPortDefault,
                                      IOServiceMatching("IOAccelerator"),
-                                     &iter) != KERN_SUCCESS) {
+                                     &iter) != kIOReturnSuccess) {
         return -1.0;
     }
 
@@ -386,13 +386,14 @@ static double macos_gpu_utilization(void)
     double util = -1.0;
     io_registry_entry_t entry;
     while ((entry = IOIteratorNext(iter)) != 0) {
-        CFMutableDictionaryRef props = NULL;
-        if (IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS &&
-            props != NULL) {
-            CFDictionaryRef stats = (CFDictionaryRef)CFDictionaryGetValue(props, CFSTR("PerformanceStatistics"));
-            if (stats != NULL && CFGetTypeID(stats) == CFDictionaryGetTypeID()) {
+        /* One property: copying the whole table took ~2.5 ms. */
+        CFTypeRef stats = IORegistryEntryCreateCFProperty(
+            entry, CFSTR("PerformanceStatistics"), kCFAllocatorDefault, 0);
+        if (stats != NULL) {
+            if (CFGetTypeID(stats) == CFDictionaryGetTypeID()) {
                 for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
-                    CFNumberRef num = (CFNumberRef)CFDictionaryGetValue(stats, keys[i]);
+                    CFNumberRef num = (CFNumberRef)CFDictionaryGetValue(
+                        (CFDictionaryRef)stats, keys[i]);
                     int v;
                     if (num != NULL && CFGetTypeID(num) == CFNumberGetTypeID() &&
                         CFNumberGetValue(num, kCFNumberIntType, &v)) {
@@ -401,7 +402,7 @@ static double macos_gpu_utilization(void)
                     }
                 }
             }
-            CFRelease(props);
+            CFRelease(stats);
         }
         IOObjectRelease(entry);
         if (util >= 0.0) {
@@ -440,43 +441,51 @@ static double macos_process_cpu_percent(uint64_t *prev_cpu_ns, uint64_t *prev_wa
     *prev_wall_ns = wall_ns;
     return percent;
 }
+
+static double g_perf_cpu_percent = 0.0;
+static double g_perf_gpu_percent = -1.0;
+
+/*
+ * Refresh the overlay's CPU and GPU load, at most twice a second: reading
+ * the accelerator's utilization walks the IORegistry, so doing it every
+ * frame would be wasteful and jittery. Called from xemu_hud_render, which
+ * runs outside the BQL; the overlay only reads the cached values.
+ */
+static void SamplePerformanceStats()
+{
+    static uint64_t prev_cpu_ns;
+    static uint64_t prev_wall_ns;
+    static uint64_t last_sample_ns;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    if (last_sample_ns != 0 && now_ns - last_sample_ns < 500000000ULL) {
+        return;
+    }
+    last_sample_ns = now_ns;
+    double cpu = macos_process_cpu_percent(&prev_cpu_ns, &prev_wall_ns);
+    if (cpu >= 0.0) {
+        g_perf_cpu_percent = cpu;
+    }
+    double gpu = macos_gpu_utilization();
+    if (gpu >= 0.0) {
+        g_perf_gpu_percent = gpu;
+    }
+}
 #endif
 
 /*
  * Optional performance readout (Settings > Display). Drawn as a small,
  * input-transparent window in the top-left corner, below the menu bar so
- * the two never overlap. CPU and GPU load are sampled at most twice a
- * second: reading the accelerator's utilization walks the IORegistry, so
- * doing it every frame would be wasteful and jittery.
+ * the two never overlap. CPU and GPU load come from
+ * SamplePerformanceStats.
  */
 static void DrawPerformanceOverlay()
 {
     if (!g_config.display.ui.show_fps) {
         return;
     }
-
-#ifdef __APPLE__
-    static uint64_t prev_cpu_ns;
-    static uint64_t prev_wall_ns;
-    static uint64_t last_sample_ns;
-    static double cpu_percent = 0.0;
-    static double gpu_percent = -1.0;
-
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-    if (last_sample_ns == 0 || now_ns - last_sample_ns >= 500000000ULL) {
-        last_sample_ns = now_ns;
-        double cpu = macos_process_cpu_percent(&prev_cpu_ns, &prev_wall_ns);
-        if (cpu >= 0.0) {
-            cpu_percent = cpu;
-        }
-        double gpu = macos_gpu_utilization();
-        if (gpu >= 0.0) {
-            gpu_percent = gpu;
-        }
-    }
-#endif
 
     const ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
@@ -491,9 +500,9 @@ static void DrawPerformanceOverlay()
     if (ImGui::Begin("###xemu_performance_overlay", nullptr, flags)) {
         ImGui::Text("%u FPS", g_nv2a_stats.increment_fps);
 #ifdef __APPLE__
-        ImGui::Text("CPU %3.0f%%", cpu_percent);
-        if (gpu_percent >= 0.0) {
-            ImGui::Text("GPU %3.0f%%", gpu_percent);
+        ImGui::Text("CPU %3.0f%%", g_perf_cpu_percent);
+        if (g_perf_gpu_percent >= 0.0) {
+            ImGui::Text("GPU %3.0f%%", g_perf_gpu_percent);
         }
 #endif
     }
@@ -529,4 +538,10 @@ void xemu_hud_render()
         SaveScreenshot(g_tex, g_flip_req, g_tex_wait_event, g_tex_wait_value);
         g_screenshot_pending = false;
     }
+
+#ifdef __APPLE__
+    if (g_config.display.ui.show_fps && !first_boot_window.is_open) {
+        SamplePerformanceStats();
+    }
+#endif
 }

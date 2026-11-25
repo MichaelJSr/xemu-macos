@@ -391,9 +391,30 @@ void main() {
 )";
 
     // AMD FidelityFX Super Resolution 1.0 (FSR 1), ported to GLSL from
-    // ffx_fsr1.h (Copyright (c) 2021 Advanced Micro Devices, Inc., MIT
-    // License). Taps are read with texelFetch rather than textureGather so
-    // the shaders only need GLSL 4.00, matching the rest of this file.
+    // ffx_fsr1.h. Taps are read with texelFetch rather than textureGather so
+    // the shaders only need GLSL 4.00, matching the rest of this file. The
+    // EASU and RCAS shaders below are under AMD's MIT license:
+    //
+    // Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+    //
+    // Permission is hereby granted, free of charge, to any person obtaining
+    // a copy of this software and associated documentation files (the
+    // "Software"), to deal in the Software without restriction, including
+    // without limitation the rights to use, copy, modify, merge, publish,
+    // distribute, sublicense, and/or sell copies of the Software, and to
+    // permit persons to whom the Software is furnished to do so, subject to
+    // the following conditions:
+    //
+    // The above copyright notice and this permission notice shall be
+    // included in all copies or substantial portions of the Software.
+    //
+    // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    // EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    // MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+    // IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+    // CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+    // TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+    // SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     //
     // EASU: edge-adaptive spatial upsampling. Analyses luma gradients in a
     // 12-tap window to find edge direction and length, then resamples with
@@ -1468,11 +1489,12 @@ static void DrawFullscreenPass(DecalShader *s, GLuint src_tex, float sx,
 
 // Advanced upscaling path: gamma (native res) -> scaler (output res) ->
 // RCAS sharpening (to target). The scaler is FSR 1 EASU, Lanczos-3 or
-// Catmull-Rom. Returns false when it does not apply (no upscaling needed),
-// in which case the caller falls back to the regular blit.
+// Catmull-Rom; sharpness 0 makes RCAS a plain copy. Returns false when it
+// does not apply (no upscaling needed), in which case the caller falls
+// back to the regular blit.
 static bool RenderFramebufferUpscaled(GLint tex, int width, int height,
                                       bool flip, float scale[2],
-                                      DecalShader *scaler)
+                                      DecalShader *scaler, float sharpness)
 {
     GLenum src_target = GL_TEXTURE_2D;
 #ifdef __APPLE__
@@ -1555,7 +1577,7 @@ static bool RenderFramebufferUpscaled(GLint tex, int width, int height,
     glClear(GL_COLOR_BUFFER_BIT);
 
     // Sharpening strength 0..1 (0 = off, 1 = AMD's maximum)
-    float sharp = g_config.display.fsr_sharpness;
+    float sharp = sharpness;
     sharp = sharp < 0.0f ? 0.0f : (sharp > 1.0f ? 1.0f : sharp);
     glUseProgram(g_fsr_rcas_shader->prog);
     glBindVertexArray(g_fsr_rcas_shader->vao);
@@ -1566,7 +1588,8 @@ static bool RenderFramebufferUpscaled(GLint tex, int width, int height,
     return true;
 }
 
-void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip, float scale[2])
+void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip,
+                       float scale[2], void *wait_event, uint64_t wait_value)
 {
 #ifdef __APPLE__
     if (xemu_present_is_metal()) {
@@ -1574,7 +1597,8 @@ void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip, float sc
         case CONFIG_DISPLAY_FILTERING_FSR:
             if (MetalRenderFramebufferUpscaled(
                     tex, width, height, flip, scale, MetalUpscaleFilter::Fsr,
-                    g_config.display.fsr_sharpness)) {
+                    g_config.display.fsr_sharpness, wait_event,
+                    wait_value)) {
                 return;
             }
             break;
@@ -1582,7 +1606,8 @@ void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip, float sc
             if (MetalRenderFramebufferUpscaled(tex, width, height, flip,
                                                scale,
                                                MetalUpscaleFilter::Lanczos,
-                                               0.0f)) {
+                                               0.0f, wait_event,
+                                               wait_value)) {
                 return;
             }
             break;
@@ -1590,7 +1615,8 @@ void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip, float sc
             if (MetalRenderFramebufferUpscaled(tex, width, height, flip,
                                                scale,
                                                MetalUpscaleFilter::Bicubic,
-                                               0.0f)) {
+                                               0.0f, wait_event,
+                                               wait_value)) {
                 return;
             }
             break;
@@ -1611,9 +1637,13 @@ void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip, float sc
     case CONFIG_DISPLAY_FILTERING_BICUBIC: scaler = g_bicubic_shader; break;
     default: break;
     }
+    // RCAS sharpening belongs to FSR; the other scalers pass through it.
+    float sharp = g_config.display.filtering == CONFIG_DISPLAY_FILTERING_FSR ?
+                      g_config.display.fsr_sharpness :
+                      0.0f;
     if (scaler && !nv2a_get_screen_off() &&
         RenderFramebufferUpscaled((GLint)tex, width, height, flip, scale,
-                                  scaler)) {
+                                  scaler, sharp)) {
         return;
     }
 
@@ -1702,7 +1732,8 @@ static void GetFramebufferTexDims(uintptr_t tex, int *w, int *h)
     glBindTexture(query_target, 0);
 }
 
-void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip)
+void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip,
+                       void *wait_event, uint64_t wait_value)
 {
     int tw, th;
     float scale[2];
@@ -1731,7 +1762,7 @@ void RenderFramebuffer(uintptr_t tex, int width, int height, bool flip)
         }
     }
 
-    RenderFramebuffer(tex, width, height, flip, scale);
+    RenderFramebuffer(tex, width, height, flip, scale, wait_event, wait_value);
 }
 
 static bool RenderFramebufferToRgb(uintptr_t tex, bool flip,
@@ -1769,7 +1800,7 @@ static bool RenderFramebufferToRgb(uintptr_t tex, bool flip,
     bool blend = glIsEnabled(GL_BLEND);
     if (blend) glDisable(GL_BLEND);
     float scale[2] = {1.0, 1.0};
-    RenderFramebuffer(tex, width, height, !flip, scale);
+    RenderFramebuffer(tex, width, height, !flip, scale, NULL, 0);
     if (blend) glEnable(GL_BLEND);
     glPixelStorei(GL_PACK_ROW_LENGTH, width);
     glPixelStorei(GL_PACK_IMAGE_HEIGHT, height);
