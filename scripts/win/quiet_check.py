@@ -2,7 +2,7 @@
 """quiet_check.py - Windows quiet-machine gate for timed xemu runs.
 
 The macOS protocol's mandatory pre-run check is `pgrep -fl "ninja|clang"`
-plus `pgrep -fl 'soak|probe-run|movement-probe|bench-savestate|abx'`;
+plus `pgrep -fl 'soak|probe-run|cast-probe|bench-savestate|abx'`;
 neither pgrep nor those shells exist here, so the whole class of
 "benchmark ran against a compiling machine" and the leftover-harness-LOOP
 incident (a stale soak that owns no xemu process between cycles and
@@ -46,7 +46,7 @@ BUILD_RE = re.compile(
     r"clang\+\+|clang|msbuild|cmake|build\.sh|rebuild-quick\.sh)"
     r"(?:\.exe)?(?:\s|\"|$)", re.I)
 HARNESS_RE = re.compile(
-    r"(soak|probe-run|movement-probe|bench-savestate|bench-receipt|abx|"
+    r"(soak|probe-run|cast-probe|bench-savestate|bench-receipt|abx|"
     r"run-test|soak-cycles)", re.I)
 
 PS = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]

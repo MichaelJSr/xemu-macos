@@ -53,39 +53,55 @@ EVENT_RE = re.compile(
 FINISH_PREFIX = "finish_"
 
 
-def parse_log(path):
-    """Return a list of interval dicts:
+SLOW_PREFIX = "nsprof: slow "
+
+
+def parse_lines(lines):
+    """Return a list of interval dicts from stderr lines (any iterable):
     {secs, flips, counters: {name: {ev, total_ms, per_flip_us, max_us}},
-     events: {name: count}}"""
+     events: {name: count}, slow: [...]}. slow holds the "slow ..."
+    creation lines printed before the interval's summary (during it);
+    those after the last summary belong to no interval and are dropped."""
     intervals = []
     cur = None
-    with open(path, "r", errors="replace") as f:
-        for line in f:
-            m = HEADER_RE.match(line)
-            if m:
-                cur = {
-                    "secs": float(m.group(1)),
-                    "flips": int(m.group(2)),
-                    "counters": {},
-                    "events": {},
-                }
-                intervals.append(cur)
-                continue
-            if cur is None:
-                continue
-            m = COUNTER_RE.match(line)
-            if m:
-                cur["counters"][m.group(1)] = {
-                    "ev": int(m.group(2)),
-                    "total_ms": float(m.group(3)),
-                    "per_flip_us": float(m.group(4)),
-                    "max_us": float(m.group(5)),
-                }
-                continue
-            m = EVENT_RE.match(line)
-            if m:
-                cur["events"][m.group(1)] = int(m.group(2))
+    slow = []
+    for line in lines:
+        m = HEADER_RE.match(line)
+        if m:
+            cur = {
+                "secs": float(m.group(1)),
+                "flips": int(m.group(2)),
+                "counters": {},
+                "events": {},
+                "slow": slow,
+            }
+            slow = []
+            intervals.append(cur)
+            continue
+        if line.startswith(SLOW_PREFIX):
+            slow.append(line[len("nsprof: "):].rstrip())
+            continue
+        if cur is None:
+            continue
+        m = COUNTER_RE.match(line)
+        if m:
+            cur["counters"][m.group(1)] = {
+                "ev": int(m.group(2)),
+                "total_ms": float(m.group(3)),
+                "per_flip_us": float(m.group(4)),
+                "max_us": float(m.group(5)),
+            }
+            continue
+        m = EVENT_RE.match(line)
+        if m:
+            cur["events"][m.group(1)] = int(m.group(2))
     return intervals
+
+
+def parse_log(path):
+    """parse_lines over the log file at path."""
+    with open(path, "r", errors="replace") as f:
+        return parse_lines(f)
 
 
 def derive(iv):
