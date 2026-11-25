@@ -6,7 +6,7 @@
 > `archive/windows-wave1-wip` keeps its commits, including the held PVIDEO
 > fix `285779ce83`, which has no validation route while testing is
 > Azurik-only. The exit-139 experiment ran as
-> [windows-port-2026-09.md](../Campaigns/windows-port-2026-09.md) §9 and
+> [windows-port-2026-09.md](windows-port-2026-09.md) §7 and
 > closed 2026-10-18: SDL's clipboard race, not `-O3`
 > ([gating audit](../windows-gating-audit.md) §T).
 > The `-DNV2A_VK_PERF_BUILD` bisect hint in §8 is obsolete: since

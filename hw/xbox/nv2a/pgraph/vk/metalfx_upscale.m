@@ -120,9 +120,10 @@ static int g_shared_refcount = 0;
  * monotonically increasing value instead of blocking the PFIFO thread
  * in waitUntilCompleted. The UI present pass encodes a GPU-side wait
  * on the frame's value before sampling MetalFX output, so the 1-5 ms
- * per-frame stall documented in the README is removed without losing
- * ordering. Under the OpenGL presentation backend the synchronous
- * wait is retained (GL cannot wait on MTLSharedEvent).
+ * per-frame stall documented in docs/optimizations.md (MetalFX +
+ * presentation) is removed without losing ordering. Under the OpenGL
+ * presentation backend the synchronous wait is retained (GL cannot
+ * wait on MTLSharedEvent).
  */
 static id<MTLSharedEvent> g_present_event = nil;
 static _Atomic uint64_t g_present_event_value = 0;

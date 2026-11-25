@@ -51,7 +51,7 @@ Writes at a halt can go through the gdbstub, or a one-entry write hook at that P
 
 ## How the fork runs it (set hooks, one advance)
 
-This is the three-hook recipe from the fork README's "Write at guest PCs". E and PAD are resolved once at the start: PAD = `0x37BE98 + 0x54*u32[0x1A7AE4]` (an index of 4 or more reads slot 0). The key is the entity's event clock.
+This is the three-hook recipe from `docs/automation.md`'s "Write at guest PCs". E and PAD are resolved once at the start: PAD = `0x37BE98 + 0x54*u32[0x1A7AE4]` (an index of 4 or more reads slot 0). The key is the entity's event clock.
 
 ```json
 {"hooks": [

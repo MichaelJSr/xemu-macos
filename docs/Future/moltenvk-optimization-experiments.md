@@ -1,355 +1,152 @@
-# MoltenVK optimization experiments (M2 Ultra audit — Tier 3 research)
+# MoltenVK optimization experiments
 
-> **Future.** Experiment A (`MVK_USE_METAL_PRIVATE_API`) was never built.
-> Experiment B's option (d) shipped (`ui/xemu.c`). Option (a), pipeline
-> prewarm, was parked 2026-10-11 ([roadmap](../roadmap.md) top candidate
-> 2: the hitch is a pipeline-cache coverage miss) and shipped 2026-10-24
-> (`prewarm.c`, `d106c5ca25`; Apple-only per `6c37968b0c`; ledger
-> "Pipeline prewarm"), reopened by an effect's first use with cold driver
-> caches: it rebuilds the recorded keys at launch, destroys each
-> pipeline and hands no handles to the LRU. Its concurrent half is the
-> prewarm itself since `d13fe7859c` (up to 4 workers); the parallel
-> compile of first-use miss bursts that the owner picked on 2026-10-24
-> was gated on that N-worker scaling test and closed by it (Metal-cold
-> 1.68× at 8 workers against the 3× bar; `xemu-history`). The
-> `SHOULD_MAXIMIZE_CONCURRENT_COMPILATION` knob (below) was to return
-> with a concurrent-compile producer; with the 4 workers it is untested
-> (V1: macOS 26's ceiling is already 24). Async compile and option (b)
-> stay closed. The body below is as written. Driver
-> versions below are as of 2026-07-21: releases now bundle MoltenVK 1.4.2
-> and local builds use the pin in `scripts/build-moltenvk.sh`.
-> Experiment B's current flow was updated 2026-10-23 for the
-> pipeline-cache save thread (v0.15.1, `42900e676d`) and the fatal
-> `VK_CHECK` (v0.15, `3147640b9b`); code is cited by symbol.
+Research record from the 2026-07-21 audit of the bundled MoltenVK on an
+M2 Ultra (24 CPU cores, 60-core GPU, `Apple 8` family, macOS 26). The
+driver then was v1.4.2-rc1 (`98f35743`), built `-O3 -mcpu=apple-m2`,
+stock `MVK_USE_METAL_PRIVATE_API=0`; releases now bundle the pin in
+`build.sh` and local builds the one in `scripts/build-moltenvk.sh`.
+Shipped MoltenVK settings are in the
+[ledger](../optimizations.md), MoltenVK runtime config. The full
+original write-up is in this file at `103c6b9187`.
 
-Research record for two MoltenVK optimizations that came out of the
-2026-07-21 deep audit of the fork's bundled MoltenVK on Apple Silicon
-(M2 Ultra, macOS 26 Tahoe). Both are **deferred as research, not
-landed** — each is parked behind an explicit bar below. Shipped MoltenVK
-config and the audit's low-risk wins live in the
-[optimization ledger](../optimizations.md#moltenvk-runtime-config); this
-document is the deep record for the two items that need code changes and
-validation before they could graduate.
+| Item | State |
+|---|---|
+| A: build with `MVK_USE_METAL_PRIVATE_API=1` | Never built; a correctness lever, not speed |
+| B (d): keep synchronous creation behind the two-tier cache | Shipped |
+| B (a): pipeline prewarm | Shipped 2026-10-24 (`prewarm.c`, `d106c5ca25`; Apple-only, `6c37968b0c`; up to 4 workers, `d13fe7859c`). It rebuilds recorded keys at launch, destroys each pipeline and hands no handles to the LRU. The parallel compile of first-use miss bursts was closed by its scaling gate (Metal-cold 1.68x at 8 workers against 3x) |
+| B (b): fail-fast creation that skips a draw (`pipeline_creation_cache_control` plus `FAIL_ON_COMPILE_REQUIRED`, supported by MoltenVK) | Rejected in 2026-07: a dropped draw can leave a render-to-texture surface stale. Adopting it also means replacing the fatal `VK_CHECK` in `create_pipeline`, which ends the process on the positive `VK_PIPELINE_COMPILE_REQUIRED`. `perf.async_pipeline_compile` (Better-xemu4macOS merge, `ccfdac39a5`, below) shares its cost, a skipped draw, not its mechanism |
+| B (c): `VK_EXT_graphics_pipeline_library` | Absent from MoltenVK |
+| `MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION` | Reverted: inert on macOS 26 (V1); untested with the prewarm workers |
 
-State: **2026-07-21.** Bundled driver = MoltenVK **v1.4.2-rc1**
-(`98f35743`, reports 1.4.2), built `-O3 -mcpu=apple-m2`, arm64-only,
-`MVK_USE_METAL_PRIVATE_API=0` (stock). Host = Apple M2 Ultra, 24 CPU
-cores (16P+8E), 60-core GPU, Metal 4 / MSL 4.0, `Apple 8` GPU family.
+## Audit framing
 
----
+The GPU is far from busy (about 740-830 draws a flip); the fork is CPU
+and driver bound. So only MoltenVK changes that cut CPU-side driver
+overhead or compile stalls can matter. Most `MVK_CONFIG_*` knobs were
+already optimal or the driver default: `USE_METAL_ARGUMENT_BUFFERS=1`
+is the default (the fork sets it as pin-drift insurance), `USE_MTLHEAP`
+defaults to `WHERE_SAFE` (always on Apple GPUs), and
+`VK_SEMAPHORE_SUPPORT_STYLE` defaults to `MTLSharedEvent`. A higher
+deployment target doesn't help: MoltenVK gates OS paths with runtime
+`mvkOSVersionIsAtLeast()` (152 call sites), which doesn't constant-fold.
 
-## Audit framing (why only these two)
+## Live validation (2026-07-21)
 
-The bundled MoltenVK is already heavily tuned. The decisive workload
-fact: the 60-core GPU is **massively underutilized** (~740–830
-draws/flip is trivial for it) and the fork is CPU/driver-bound —
-`roadmap.md` confirms the wall is guest-TCG throughput. So the only
-MoltenVK changes that can matter reduce **CPU-side driver overhead** or
-**shader-compilation stalls**, never GPU throughput.
+**V1, the concurrent-compilation hint is inert.** On macOS 26 the M2
+Ultra reports `maximumConcurrentCompilationTaskCount = 24` (the CPU
+count) before and after `setShouldMaximizeConcurrentCompilation:YES`.
+It may still matter on macOS 14/15, and only with a producer of
+concurrent compiles. Probe: `clang -fobjc-arc -framework Metal
+-framework Foundation ccprobe.m` reading the count, setting the hint and
+reading it again.
 
-Cross-referencing every `MVK_CONFIG_*` knob against
-`MVKEnvironment.h` defaults found most already-optimal or already the
-driver default:
+**V2, the private-API flag flips exactly the predicted features.** Two
+dylibs from the same v1.4.2-rc1 source, the variant built to an
+isolated `SYMROOT` so `/usr/local` and `dist/` stay untouched. Each was
+`dlopen`ed and probed through a bare instance on the ICD (no
+portability-enumeration extension, a loader concept) with
+`vkGetPhysicalDeviceFeatures` and
+`vkEnumerateDeviceExtensionProperties`:
 
-- `USE_METAL_ARGUMENT_BUFFERS=1` — already the driver default
-  (`MVKEnvironment.h:299`); the fork's explicit set is pin-drift
-  insurance, not a delta.
-- `USE_MTLHEAP` (unset) — defaults to `WHERE_SAFE`, which is `ALWAYS`
-  on Apple GPUs; placement heaps already on.
-- `VK_SEMAPHORE_SUPPORT_STYLE` (unset) — defaults to
-  `METAL_EVENTS_WHERE_SAFE` → `MTLSharedEvent`, already used.
-- A raised deployment target does **not** help: MoltenVK gates OS paths
-  with runtime `mvkOSVersionIsAtLeast()` (`Common/MVKOSExtensions.h:50`,
-  152 call sites, zero `@available`), which does not constant-fold.
-
-Two low-risk wins shipped in the audit (see the ledger): the pin bump to
-v1.4.2-rc1 and `LOG_LEVEL=1`. A third, `SHOULD_MAXIMIZE_CONCURRENT_-
-COMPILATION=1`, was shipped, then **measured inert on this box** (see
-§Live validation V1) and **reverted**. Its real value is gated behind
-Experiment B — it should return only alongside a concurrent-compile
-producer (prewarm).
-
-Everything else worth doing needs code + validation. That is these two
-experiments.
-
----
-
-## Live validation (measured on this box, 2026-07-21)
-
-Two probes were run directly against the hardware/driver to move these
-claims from "source says" to "measured here." Reproduction steps are in
-the appendix.
-
-### V1 — the concurrent-compilation knob is inert on macOS 26 / M2 Ultra
-
-`MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION` maps to
-`-[MTLDevice setShouldMaximizeConcurrentCompilation:]`
-(`MVKDevice.mm:2396`). A direct Metal probe:
-
-```
-device: Apple M2 Ultra
-respondsTo maximumConcurrentCompilationTaskCount   = 1
-respondsTo setShouldMaximizeConcurrentCompilation: = 1
-BEFORE: maximumConcurrentCompilationTaskCount = 24
-set shouldMaximizeConcurrentCompilation = YES
-AFTER : maximumConcurrentCompilationTaskCount = 24
-```
-
-On macOS 26 the reported concurrency ceiling is **already 24 (= CPU
-count) by default**, and the hint does not raise it. Combined with the
-fact that xemu creates pipelines **strictly serially** on one thread
-(Experiment B §1), the knob does nothing measurable here today. It may
-still matter on macOS 14/15 (Metal historically throttled the default
-lower) and becomes meaningful only once a concurrent-compile producer
-exists (Experiment B, option a). It was therefore **reverted** from the
-shipped config; it should return only alongside a prewarm producer.
-
-### V2 — the private-API flag flips exactly the predicted capabilities on
-
-Two MoltenVK dylibs were built from the **same** v1.4.2-rc1 source,
-differing only in `MVK_USE_METAL_PRIVATE_API` (stock UUID
-`4477256B…`, variant `3BC561D0…`), then probed via a bare instance
-talking directly to each ICD:
-
-| Capability (device-level) | stock `=0` | variant `=1` |
+| Capability | stock `=0` | `=1` |
 |---|---|---|
-| `VkPhysicalDeviceFeatures.wideLines` | 0 | **1** |
-| `VkPhysicalDeviceFeatures.logicOp` | 0 | **1** |
-| `VK_EXT_provoking_vertex` | absent | **present** |
-| `VK_EXT_primitive_topology_list_restart` | absent | **present** |
-| `VK_EXT_non_seamless_cube_map` | absent | **present** |
-| `VK_EXT_legacy_dithering` | absent | **present** |
-| total advertised device extensions | 130 | **134** |
+| `wideLines`, `logicOp` | 0 | 1 |
+| `VK_EXT_provoking_vertex`, `VK_EXT_primitive_topology_list_restart`, `VK_EXT_non_seamless_cube_map`, `VK_EXT_legacy_dithering` | absent | present |
+| advertised device extensions | 130 | 134 |
 
-This confirms the runtime gating is real (not just a build-time
-`#if`): without the flag these are genuinely absent from
-`vkGetPhysicalDeviceFeatures` / `vkEnumerateDeviceExtensionProperties`,
-so xemu could never opt into them against a stock dylib. The `+4`
-extensions are exactly the four rows above. (MoltenVK's own startup
-info-dump lists 154 "supported" extensions in both builds — that is the
-build-time known set, *not* the advertised set; the probe's 130/134 is
-authoritative.)
+The gating is real at runtime, so xemu can't opt in against a stock
+dylib. (MoltenVK's startup dump lists 154 extensions in both builds;
+that is the build-time set, not the advertised one.)
 
----
+## Experiment A: `MVK_USE_METAL_PRIVATE_API=1`
 
-## Experiment A — build MoltenVK with `MVK_USE_METAL_PRIVATE_API=1`
+The flag is build-time, default 0 (`MVKCommonEnvironment.h`); at runtime
+`mvkSetConfig` ANDs the config bit with it, so building with 1 turns the
+private API on by default and `MVK_CONFIG_USE_METAL_PRIVATE_API` can
+only turn it off. It is a no-op against a stock dylib.
 
-### Mechanism
-
-`MVK_USE_METAL_PRIVATE_API` is a **build-time** flag, default `0`
-(`Common/MVKCommonEnvironment.h:112`). At runtime `mvkSetConfig`
-force-ANDs the config bit with the compile flag
-(`MVKEnvironment.cpp:80-81`), and the config member's default *is* the
-build flag (`MVKEnvironment.h:328`). Consequences:
-
-- Building with `=1` turns the private API **on by default at
-  runtime**. The env var `MVK_CONFIG_USE_METAL_PRIVATE_API` can only
-  force it *off* (or redundantly on) — **it is a no-op against a stock
-  dylib.** The fork builds its own MoltenVK, so this is a knob it owns.
-- This is primarily a **correctness/quality** lever, not a speed one.
-
-### What it unlocks, and the underlying private Metal call
-
-| Vulkan feature | Private Metal API used | Gate |
-|---|---|---|
-| `VK_EXT_provoking_vertex` (`provokingVertexLast`, per-pipeline, EDS3 mode) | `-[MTLRenderCommandEncoder setProvokingVertexMode:]` | `MVKDevice.mm:763/1292/716`, `MVKCommandEncoderState.mm:1204` |
-| core `logicOp` | `MTLRenderPipelineDescriptor.isLogicOperationEnabled/logicOperation` (SPI) | `MVKDevice.mm:2765`, `MTLRenderPipelineDescriptor+MoltenVK.m:32-35` |
-| core `wideLines` | `-[MTLRenderCommandEncoder setLineWidth:]` | `MVKDevice.mm:2769`, `MVKCommandEncoderState.mm:1198` |
-| `VK_EXT_primitive_topology_list_restart` | `setOpenGLModeEnabled:` + `setPrimitiveRestartEnabled:index:` | `MVKRenderPass.mm:289`, `MVKCommandEncoderState.mm:1363` |
-| `VK_EXT_non_seamless_cube_map` | `MTLSamplerDescriptor.forceSeamsOnCubemapFiltering` (SPI) | `MVKImage.mm:2536`, `MTLSamplerDescriptor+MoltenVK.m:28` |
-| `VK_EXT_legacy_dithering` | `-[MTLRenderPassDescriptor setDitherEnabled:]` | `MVKRenderPass.mm:284` |
-| fixed-function `sampleMask`/coverage | `MTLRenderPipelineDescriptor.sampleMask/sampleCoverage` (SPI) | `MVKPipeline.mm:2020` (already emulated in-shader without it) |
-
-Not gated by this flag (so no benefit from it): depth clip/clamp
-(`setDepthClipMode:` is public), sample locations, custom border color
-(already used via `respondsToSelector`).
-
-### Per-feature benefit to the NV2A renderer
-
-| Feature | NV2A status today | Payoff | Priority |
+| Feature | Private Metal API | NV2A today | Value |
 |---|---|---|---|
-| **wideLines** | Requested optionally (`instance.c:549`); dynamic line width used only if present (`draw.c:1425-1426`), else clamped to 1px (`draw.c:1278`) | **Correct wide/upscaled lines** — and the *build flag alone* enables it, xemu already probes for it. Zero xemu code change. | **Highest / cleanest** |
-| **logicOp** | Registers decoded (`NV_PGRAPH_BLEND_LOGICOP*`) but **ignored**: `logicOpEnable` hard-`VK_FALSE` (`draw.c:985,1409`); GL→VK map is dead commented code (`vk/constants.h`) | Fixes silently-dropped **XOR cursors / INVERT** blends. Needs a small `draw.c` + register-wiring change | **High** |
-| primitiveTopologyListRestart | Restart honored for strip/fan only; NV2A maps `TRIANGLES/LINES/QUADS`→list topologies where it can't (`draw.c:99,92,105`) | Targeted correctness for restart markers in list/quad draws | Moderate |
-| provokingVertex | CPU index-rotation fallback (see §quantified) | Removes per-draw CPU work for flat first-vertex **triangle-lists** only | Marginal (see below) |
-| legacyDithering | Honored on GL backend, **ignored on VK** | Parity only; barely perceptible | Low |
-| nonSeamlessCubeMap | Cube maps work; no seamless control anywhere | Accuracy only; no waiting consumer | Low |
-| sampleMask / sampleLocations / depthClip | Single-sample, supersampled AA, in-shader depth clip (`psh.c:1069-1078`) | **None** as architected | None |
+| `wideLines` | `setLineWidth:` | Requested optionally (`instance.c`); dynamic width only with it (`init_frame_dynamic_states`), else 1 px | Highest: correct wide and upscaled lines with no xemu change |
+| `logicOp` | `isLogicOperationEnabled` / `logicOperation` (SPI) | `NV_PGRAPH_BLEND_LOGICOP*` decoded but ignored: `logicOpEnable = VK_FALSE`; `pgraph_blend_logicop_map` is commented out in `vk/constants.h` | High: fixes dropped XOR cursors and INVERT blends |
+| list restart | `setOpenGLModeEnabled:`, `setPrimitiveRestartEnabled:index:` | Restart honored for strips and fans only | Moderate |
+| provoking vertex | `setProvokingVertexMode:` | CPU index rotation | Marginal (below) |
+| legacy dithering | `setDitherEnabled:` | Honored on GL, ignored on Vulkan | Low |
+| non-seamless cube maps | `forceSeamsOnCubemapFiltering` (SPI) | No seamless control | Low |
 
-### Provoking vertex, quantified
+Not gated by the flag: depth clip and clamp, sample locations, custom
+border color. Sample mask and coverage are already emulated in-shader.
 
-`draw_needs_primitive_emulation()` (`draw.c:122-157`) forces CPU
-primitive emulation **unconditionally** for `LINE_LOOP`, `QUADS`,
-`QUAD_STRIP` and for line-mode `POLYGON` — because Metal has no such
-primitives. For `PRIM_TYPE_TRIANGLES` the **only** trigger is
-provoking-vertex == FIRST (`draw.c:143-151`). So native
-`VK_EXT_provoking_vertex` removes emulation for **exactly the
-triangle-list-first-vertex case and nothing else**; quads/line-loops/
-polygons still need CPU index expansion regardless.
+**Provoking vertex.** `draw_needs_primitive_emulation()` forces CPU
+emulation for `LINE_LOOP`, `QUADS`, `QUAD_STRIP` and line-mode `POLYGON`
+regardless (Metal lacks them); for `TRIANGLES` its only trigger is
+provoking vertex FIRST. The rotation (`build_emulated_indices_from_*`)
+emits `(v1,v2,v0)` with no index inflation, but turns a `vkCmdDraw` into
+a CPU-built index array plus `vkCmdDrawIndexed`, even for Gouraud lists
+where the provoking vertex doesn't matter. Hardware default is LAST
+(`pgraph.c`), so the cost appears only while a title selects FIRST. Net:
+a few percent of CPU in affected scenes at most, for the riskiest change.
 
-Cost of the case it would remove: the rotation
-(`build_emulated_indices_from_array/_from_elements`, `draw.c:294-310,
-399-411`) emits each triangle `(v0,v1,v2)` as `(v1,v2,v0)`. There is
-**no index-count inflation** for triangles (`draw.c:192-193`), but it
-converts a non-indexed `vkCmdDraw` into a CPU-built index array +
-`vkCmdDrawIndexed` (~`count` uint32 writes + an index-buffer upload per
-affected draw), and it triggers on the register alone — **even for
-Gouraud-shaded** lists where provoking vertex is visually irrelevant.
-Hardware default is provoking=LAST (`pgraph.c:394-395`), so the cost
-appears only while a title has selected FIRST; exact prevalence needs
-profiling. On desktop this is solved in a geometry shader
-(`glsl/geom.c`), which is why the Vulkan extension is not requested on
-any platform today — the CPU path is the MoltenVK-only fallback.
+**Adopting it:**
 
-Net: a few-percent CPU/bandwidth reclaim in affected scenes, not a
-headline speedup, and the highest-effort + highest-risk item behind the
-flag.
+1. `scripts/build-moltenvk.sh`: `OTHER_CFLAGS="-mcpu=${MCPU}
+   -DMVK_USE_METAL_PRIVATE_API=1"` (how V2's variant was built).
+   Optionally `MVK_CONFIG_USE_METAL_PRIVATE_API=1` in both `ui/xemu.c`
+   and `Info.plist`.
+2. `wideLines`: nothing to wire; validate visually.
+3. `logicOp`: set `logicOpEnable` / `logicOp` from the register and
+   revive the map.
+4. Provoking vertex, separately: request `VK_EXT_provoking_vertex` with
+   `provokingVertexLast`, skip emulation for `TRIANGLES` when active,
+   chain `VkPipelineRasterizationProvokingVertexStateCreateInfoEXT`, and
+   add provoking mode to the pipeline key (it is excluded today, so two
+   draws differing only in it would share a stale pipeline). Keep the CPU
+   rotation as the fallback.
 
-### Concrete change to adopt (if pursued)
+**Risk.** Every private selector is behind `-respondsToSelector:`, so an
+OS that drops one gives silent wrong output (flat colors, 1 px lines, no
+restart) rather than a crash. `setLineWidth:`, `setProvokingVertexMode:`
+and `setPrimitiveRestartEnabled:` are long-standing AGX SPI;
+`setOpenGLModeEnabled:` and `setDitherEnabled:` are the least known. The
+flag turns `wideLines` on at once, a real behaviour change. Re-validate
+on every MoltenVK pin bump and macOS update.
 
-1. **Build flag** — `scripts/build-moltenvk.sh`, append to the existing
-   override: `OTHER_CFLAGS="-mcpu=${MCPU} -DMVK_USE_METAL_PRIVATE_API=1"`.
-   (Verified sufficient: the V2 variant was built exactly this way.)
-2. **Runtime (optional, for explicitness)** — `MVK_CONFIG_USE_METAL_-
-   PRIVATE_API=1` in `ui/xemu.c` + `Info.plist` (kept in sync).
-3. **wideLines** — nothing; already wired. Validate visually first.
-4. **logicOp** — consume `NV_PGRAPH_BLEND_LOGICOP*`; set
-   `logicOpEnable/logicOp` at `draw.c:1409` from the register; revive
-   the GL→VK map in `vk/constants.h`.
-5. **provokingVertex (separate, fallback-preserving)** — request
-   `VK_EXT_provoking_vertex` + chain
-   `VkPhysicalDeviceProvokingVertexFeaturesEXT{provokingVertexLast=TRUE}`
-   in `instance.c` (mirror `custom_border_features`); make
-   `draw_needs_primitive_emulation` return false for the TRIANGLES case
-   when the extension is active; chain
-   `VkPipelineRasterizationProvokingVertexStateCreateInfoEXT` in
-   `create_pipeline`; **and add provoking mode to the pipeline-cache
-   key** (`draw.c:1075-1087` deliberately excludes it today) or two
-   draws differing only in provoking mode collide on a stale pipeline.
-   **Keep the CPU rotation as a fallback — do not delete it.**
+**Bar:** a visual A/B on the target OS confirming `wideLines` and
+`logicOp` with no regression on a boot and game run; provoking vertex
+additionally needs a profile showing FIRST-mode triangle lists are a
+material CPU cost. These clear on correctness, not fps.
 
-### Risk surface
+## Experiment B: pipeline creation
 
-Guard discipline is uniform: every private selector is behind
-`-respondsToSelector:` (no `@available`, no unguarded dispatch). So the
-failure mode on a future OS that drops an AGX SPI is a **silent no-op**,
-not a crash — which for a renderer means **silent wrong output** (wrong
-flat-shade colors, 1px lines, restart not applied) with no error and no
-log. macOS 26 is in scope but the private selectors are validated only
-empirically. `setLineWidth:` / `setProvokingVertexMode:` /
-`setPrimitiveRestartEnabled:` are long-standing AGX SPI (lower risk);
-`setOpenGLModeEnabled:` / `setDitherEnabled:` are the least documented
-(higher risk). App Store disqualification is moot (GPL, self-signed).
-Enabling the flag **immediately flips wideLines on** (xemu already
-requests it) — a real line-rendering behavior change that must be in the
-same validation pass. Re-validate on every MoltenVK pin bump and macOS
-update.
-
-### Verdict + bar
-
-**Favorable, staged, fallback-preserving.** Land the flag purely for
-**wideLines** first (free, visually verifiable in minutes), then wire
-**logicOp**. Treat provoking vertex as a separate guarded follow-up that
-layers on top of — never replaces — the CPU rotation. **Bar:** visual
-A/B on the target OS confirming wideLines/logicOp correctness with zero
-regression on a boot+game run; provoking vertex additionally gated on
-profiling showing FIRST-mode triangle-list draws are a material CPU
-cost. These are accuracy wins, not the speed the audit targeted — so
-they clear on *correctness value*, not fps.
-
----
-
-## Experiment B — async / non-blocking graphics-pipeline creation
-
-### Current flow
-
-Pipeline creation is **fully synchronous**, on the hot draw path. Chain:
-`pfifo_thread` → `pgraph_method` → `pgraph_vk_flush_draw` /
-`pgraph_vk_draw_end` → `begin_pre_draw` → `create_pipeline` →
-`vkCreateGraphicsPipelines` (blocking). Creation is serialized by
-`pgraph.lock`: on the PFIFO thread in normal mode, and under icount on
-the thread running the inline pusher (`pfifo_icount_sync`, usually the
-vCPU). Since v0.15.1 the `VkPipelineCache` is shared with a background
-saver (`pipeline_cache_save_thread`, `vkGetPipelineCacheData`), so it
-stays internally synchronized (never
+**Flow.** `pfifo_thread` -> `pgraph_method` -> `pgraph_vk_flush_draw` /
+`pgraph_vk_draw_end` -> `begin_pre_draw` -> `create_pipeline` ->
+`vkCreateGraphicsPipelines`, serialized by `pgraph.lock` (on the PFIFO
+thread, or under icount on the inline pusher's thread). An in-memory LRU
+(`r->pipeline_cache`, 4096 entries, keyed by `PipelineKey`) sits on a
+driver `VkPipelineCache` persisted as `pipeline_cache.bin` and saved
+off-thread at flips (`pipeline_cache_save_thread`, v0.15.1,
+`42900e676d`). So the cache stays internally synchronized (never
 `VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT`), and a creation
-can wait on a running save's serialization.
+can wait on a running save's serialization. A failed
+`vkCreateGraphicsPipelines` is fatal (`VK_CHECK`, `pgraph_vk_fatal_error`;
+v0.15, `3147640b9b`).
 
-Two-tier cache makes steady state compile-free: an in-memory LRU
-(`r->pipeline_cache`, 4096 entries) keyed by `PipelineKey`, backed by
-a driver `VkPipelineCache` persisted to disk (`pipeline_cache.bin`,
-loaded in `init_pipeline_cache`, saved off-thread at flips once it grew,
-`pgraph_vk_maybe_save_pipeline_cache`). On an LRU hit (the `lru_lookup`
-hit in `create_pipeline`) the handle is reused with **zero compile**.
+**Hitch.** A miss runs SPIR-V -> MSL -> MTLLibrary ->
+MTLRenderPipelineState on the PFIFO thread; MoltenVK blocks on a
+condition variable until Metal finishes (`metalCompileTimeout`, default
+`INT64_MAX`). That stalls the new frame and the flip ack
+(`pgraph_vk_flip_stall`), and N first-encounter pipelines cost N serial
+compiles (`NSPROF_PIPELINE_GEN`). The disk cache stores compressed MSL,
+not Metal binaries, so a warm boot still pays `newLibraryWithSource` and
+`newRenderPipelineState` on first use each session.
 
-### Hitch cost
-
-On a miss, `vkCreateGraphicsPipelines` runs the full
-SPIR-V→MSL→MTLLibrary→MTLRenderPipelineState lowering on the PFIFO
-thread. SPIRV-Cross runs single-threaded there; the Metal steps
-`dispatch_async` then **block on a condition variable** until done
-(`MVKSync.mm:455`, timeout `metalCompileTimeout` default `INT64_MAX`).
-This does not corrupt an in-flight present (present is on the UI thread)
-but **stalls production of the new frame and the flip ack**
-(`pgraph_vk_flip_stall`), i.e. a frame-time spike / dropped frame. Misses
-**serialize on one thread**, so entering a scene with N first-encounter
-pipelines is an N× multi-frame hitch. xemu already instruments this:
-`NSPROF_PIPELINE_GEN` / `NV2A_PROF_PIPELINE_GEN`.
-
-Crucial nuance: the on-disk cache stores **compressed MSL, not Metal
-binaries** (`MVKPipeline.mm:2631`). So a warm boot skips SPIR-V→MSL but
-still pays a `newLibraryWithSource` + `newRenderPipelineState` on first
-use each session (OS-function-cache-accelerated) — exactly the
-streaming pain.
-
-### Interaction with the concurrent-compile knob (and why it is inert today)
-
-xemu issues exactly **one** `vkCreateGraphicsPipelines` at a time, so
-the knob's inter-compile parallelism is never exercised, and V1 shows it
-does not raise the ceiling on macOS 26 anyway. Any async design that
-issues **concurrent** compiles is precisely what would make both the
-knob and the idle cores earn their keep. They are complements, not
-substitutes.
-
-### Options
-
-| Option | MoltenVK support (this pin) | Verdict |
-|---|---|---|
-| (a) Parallel prewarm at startup/idle | thread-safe: cache guarded by `_shaderCacheLock`, compilers `@synchronized(getMTLDevice())` | **Best if anything.** Persist the `PipelineKey` set from prior sessions; a worker recreates them concurrently into the shared `VkPipelineCache` (already shared with the save thread); hand finished handles to the PFIFO thread for LRU insertion at flip boundaries. xemu-side caches must stay single-threaded. ~200–400 LOC. Moderate risk. |
-| (b) `pipeline_creation_cache_control` + `FAIL_ON_COMPILE_REQUIRED` | **supported** (`MVKExtensions.def:164`); fail-fast confirmed (`MVKShaderModule.mm:326`, `MVKPipeline.mm:2385`) | **Rejected for live draws.** Dropping an NV2A draw for a frame can leave a render-to-texture surface stale and cascade into corruption — unacceptable for frame-accurate emulation. Keep only as a cheap "is-cached?" probe building block for (a). Also requires replacing the `VK_CHECK` on `create_pipeline`'s `vkCreateGraphicsPipelines` (any result but `VK_SUCCESS`, including the positive `VK_PIPELINE_COMPILE_REQUIRED`, ends the process through `pgraph_vk_fatal_error`). |
-| (c) `VK_EXT_graphics_pipeline_library` | **absent** from `MVKExtensions.def` | Off the table without patching MoltenVK; poor fit for NV2A's monolithic dynamic-state pipelines anyway. |
-| (d) Do nothing more | — | **Honest default.** Two-tier + on-disk cache already makes steady state and warm boots cheap. |
-
-### Verdict + bar
-
-**Ship (d) now.** Pursue **(a) parallel prewarm** only if
-`NSPROF_PIPELINE_GEN` / `NSPROF_PRESENT_WAIT` profiling on target titles
-shows first-encounter compile bursts are a material, recurring hitch
-(not a one-time cold-boot cost the on-disk cache already amortizes).
-**Bar:** a measured hitch profile that (a) would demonstrably flatten,
-justifying ~200–400 LOC and the single-threaded-cache-mutation
-discipline. This is the only *performance* follow-up of the two
-experiments, and the one design that finally uses the concurrent-compile
-knob.
-
----
-
-## Appendix — reproducing the validation
-
-Both probes are self-contained and need no Vulkan SDK.
-
-**V1 (concurrent compilation)** — `clang -fobjc-arc -framework Metal
--framework Foundation ccprobe.m`: create `MTLCreateSystemDefaultDevice`,
-read `maximumConcurrentCompilationTaskCount`, set
-`shouldMaximizeConcurrentCompilation = YES`, read it again.
-
-**V2 (private-API feature diff)** — build two dylibs from the same
-MoltenVK checkout, one with `OTHER_CFLAGS="… -DMVK_USE_METAL_PRIVATE_-
-API=1"` to an isolated `SYMROOT` (leaves `/usr/local` + `dist/`
-untouched). Probe each by `dlopen`ing it, bootstrapping
-`vkGetInstanceProcAddr`, creating a **bare** instance (no
-portability-enumeration extension — that is a loader concept, absent
-when talking to the ICD directly), then reading
-`vkGetPhysicalDeviceFeatures` (wideLines, logicOp) and
-`vkEnumerateDeviceExtensionProperties` (the four `VK_EXT_*`). The stock
-vs. variant diff is the table in §Live validation V2.
+**Async first-use compile** (`perf.async_pipeline_compile`, Settings >
+Performance; `vk/async.c`; MoltenVK and KosmicKrisp only). A
+first-encounter miss is built on one worker thread through
+`pgraph_vk_build_draw_pipeline`, and the draw is skipped until the build
+lands; the PFIFO thread installs the handle on drain. A key is built
+synchronously 200 ms after submission, a failed submit falls back at
+once, and no worker starts under icount. The worker never touches PGRAPH
+state or the renderer's single-threaded caches. The cost is the one (b)
+was rejected for: a skipped draw that wrote a render-to-texture surface
+leaves it a frame stale until the retry.

@@ -48,7 +48,7 @@
 #
 # Scancode table (name = SDL_Scancode value; the fork's default keyboard
 # bindings this table matches are documented in the xemu-operate skill
-# and the README):
+# and docs/automation.md, Input pipe):
 #   W=26 A=4 S=22 D=7            WASD          (left stick, in the default map)
 #   UP=82 DOWN=81 LEFT=80 RIGHT=79   arrow keys (Down/Right/Left = A/B/X buttons
 #                                     in the default map; Up is provided for

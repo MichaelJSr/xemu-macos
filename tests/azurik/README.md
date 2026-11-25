@@ -48,8 +48,8 @@ the scratch config's `[input.keyboard_controller_scancode_map]` with that map, o
 Packs 01, 02, 04, 05 and 10, and 03's checks, run over QMP. The repo has no driver for them yet. Use one xemu per
 run, set up the way `bench-det.py`'s `scratch()` and `run_once()` do it: a per-run clone and config, a
 `scripts/xemu_lease.py` launch, `XEMU_HEADLESS=null`, `-S -icount shift=2,align=off,sleep=off`, then `stop`
-and HMP `loadvm <tag>` (the VM stays paused). After that, apply the pack's hooks with the main README's
-"Headless mode (automation)" commands: `xemu-hooks-set`, `xemu-run-until`, `xemu-frame-advance` and
+and HMP `loadvm <tag>` (the VM stays paused). After that, apply the pack's hooks with the commands in
+[`docs/automation.md`](../../docs/automation.md): `xemu-hooks-set`, `xemu-run-until`, `xemu-frame-advance` and
 `xemu-ram-digest`.
 
 ## Expected results on v0.15

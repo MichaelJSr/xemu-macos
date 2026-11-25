@@ -159,11 +159,12 @@ the null renderer, for logic, RAM and gdbstub work. stderr then shows
 (PNG with `"format":"png"`); it works windowed too, but not from HMP.
 Deterministic, bit-exact replays: add `-S -icount shift=2,align=off,sleep=off`
 (null renderer), `loadvm`, write `+N` pipe lines while paused, then
-`xemu-frame-advance`; same inputs give the same RAM (README). Compare runs with
-QMP `xemu-ram-digest` (RAM's sha256, no file; `against` a checkpoint lists the
-pages that changed). Branch loops: `xemu-checkpoint-save` with `base`, then
-`xemu-checkpoint-restore` with `incremental` (README); audit the dirty log
-with `verify` (`pages-missed` 0) after touching any device that writes RAM.
+`xemu-frame-advance`; same inputs give the same RAM (`docs/automation.md`).
+Compare runs with QMP `xemu-ram-digest` (RAM's sha256, no file; `against`
+a checkpoint lists the pages that changed). Branch loops:
+`xemu-checkpoint-save` with `base`, then `xemu-checkpoint-restore` with
+`incremental` (`docs/automation.md`); audit the dirty log with `verify`
+(`pages-missed` 0) after touching any device that writes RAM.
 A demo played in real time yet deterministic: `XEMU_ICOUNT_LIVE_PADS=1` with
 `-icount shift=2,align=on,sleep=on` (host pads read at vblanks); its
 `XEMU_INPUT_RECORD` replays under `sleep=off` to the same RAM (it holds one
@@ -171,7 +172,7 @@ port, `XEMU_INPUT_RECORD_PORT=1-4`, default the first bound one: keep live
 sources on it; windowed replays are exact on macOS).
 fps runs stay windowed, because headless never presents and so measures
 a different pipeline. Code: `xemu_headless_mode()` in `ui/xemu.c`.
-README "Headless mode (automation)" lists the harness interfaces:
+`docs/automation.md` lists the harness interfaces:
 analog and frame-tagged pipe input, `xemu-frame-advance` (any stop it
 didn't make, such as a gdbstub attach, ^C or SIGTERM, ends it with that
 run state in `stopped`), `query-xemu-display` (frame and load count at
@@ -275,7 +276,7 @@ A/Bs; offscreen RAM hashes are per driver. A KK run killed in its first
 it): the launchers warn when the bench cache has one (remove it), and a
 strike test gets its own `XEMU_BASE_PATH`.
 
-**Goldens** (deterministic; see the README's deterministic mode):
+**Goldens** (deterministic; see "Deterministic mode" in `docs/automation.md`):
 `python3 -I scripts/bench-det.py --check goldens x=APP` runs all of them
 (heavy-f1 f300/f1200, stream-e2 f600, cold boot f900/f1800) in parallel
 fresh processes, ~10 s, and asserts the hashes in `scripts/det-goldens.json`
@@ -344,7 +345,7 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_LANGUAGE=<fr\|de\|…\|n>` | The console language the guest reads (EEPROM reads; every load sets it in the kernel's EEPROM copy in RAM, so a load in another language differs from a plain one); QMP `xemu-set-language` while stopped; the EEPROM file stays untouched | `hw/xbox/smbus_storage.c`, `ui/xemu-language.c` |
 | `XEMU_TRACE_RECORD=<file>` (+ `XEMU_TRACE_REGIONS`) | A line of guest memory per vblank, `# load` per load; regions are fixed or hook address expressions re-evaluated every line; QMP `xemu-trace-regions` swaps the list; never changes the run | `ui/xemu-trace-record.c` |
 | `XEMU_ICOUNT_LIVE_PADS=1` | Under icount, host gamepads and keyboard drive their ports, read at vblanks (recordable); with `sleep=on`, exact idle warps paced on real time, `align=on` at most 0.1 s behind | `ui/xemu-input.c`, `accel/tcg/icount-common.c` |
-| `XEMU_RENDER_NULL_RAM`, `XEMU_QMP_WATCH`, `XEMU_SOCKET_BACKLOG`, `XEMU_LOADVM_SHRINK_RAM`, `XEMU_AGP_FULL_DECODE`, `XEMU_CSTATUS_FULL_RAM` | Harness opt-ins that change a run's RAM, cycles or QMP events (README; `RENDER_NULL_RAM` and `QMP_WATCH` also in xemu-internals). Launchers drop inherited ones | `vk/renderer.c`, `monitor/xemu-qmp-watch.c`, `chardev/char-socket.c`, `migration/ram.c`, `hw/xbox/xbox_pci.c`, `hw/xbox/nv2a/pfb.c` |
+| `XEMU_RENDER_NULL_RAM`, `XEMU_QMP_WATCH`, `XEMU_SOCKET_BACKLOG`, `XEMU_LOADVM_SHRINK_RAM`, `XEMU_AGP_FULL_DECODE`, `XEMU_CSTATUS_FULL_RAM` | Harness opt-ins that change a run's RAM, cycles or QMP events (`docs/automation.md`; `RENDER_NULL_RAM` and `QMP_WATCH` also in xemu-internals). Launchers drop inherited ones | `vk/renderer.c`, `monitor/xemu-qmp-watch.c`, `chardev/char-socket.c`, `migration/ram.c`, `hw/xbox/xbox_pci.c`, `hw/xbox/nv2a/pfb.c` |
 | `XEMU_VK_DRIVER=kosmickrisp\|moltenvk\|<dylib>` | Diagnostic: the Vulkan driver, overriding `display.vulkan.driver` and the MoltenVK pin (KK benches, windowed or headless; no strike marker); a failure exits 1. Launchers drop an inherited one | `vk/instance.c` |
 | *Diagnostics (stderr)* | | |
 | `XEMU_NV2A_NSPROF=1` | fps, draws, passes, fence every 5 s | `hw/xbox/nv2a/nsprof.c` |
@@ -354,8 +355,8 @@ Retired: `vm-20260704173701` (F8), F6, F7, `azurik-heavy-e3`,
 | `XEMU_VTX_SPAN_REFUTE=1` | Checks every skipped vertex finish/wait against the draws' actual vertex bindings; exit line `xemu: vtx-span refute checks=N violations=M` (needs `quit`) | `vk/vertex.c` |
 | `XEMU_DSP_JIT_STATS=1`, `_DIFF=N` | DSP JIT stats; validator | `mcpx/apu/dsp/interp/dsp56k_jit_arm64.c` |
 | `XEMU_INV_PROF=1`, `XEMU_TB_PROF=1` | Exit dumps (need `quit`) | `tcg/tb-maint.c`, `tcg/cpu-exec.c` |
-| `XEMU_BLOCK_LOG=<file>` | One TSV row per IDE/ATAPI data command (README; QMP `xemu-block-log-start`/`-stop`); 1-2% host time while on | `hw/ide/xemu-block-log.c` |
-| `XEMU_VOICE_LOG=<file>`, `XEMU_AUDIO_WAV=<file>` | One TSV row per APU voice start/release/pause/resume/stop (buffer's physical runs, format, pitch, volume); the APU's output as a 48 kHz WAV, with no host device (README; QMP `xemu-voice-log-*`, `xemu-audio-wav-*`). Deterministic under icount | `mcpx/apu/xemu-audio-log.c` |
+| `XEMU_BLOCK_LOG=<file>` | One TSV row per IDE/ATAPI data command (`docs/automation.md`; QMP `xemu-block-log-start`/`-stop`); 1-2% host time while on | `hw/ide/xemu-block-log.c` |
+| `XEMU_VOICE_LOG=<file>`, `XEMU_AUDIO_WAV=<file>` | One TSV row per APU voice start/release/pause/resume/stop (buffer's physical runs, format, pitch, volume); the APU's output as a 48 kHz WAV, with no host device (`docs/automation.md`; QMP `xemu-voice-log-*`, `xemu-audio-wav-*`). Deterministic under icount | `mcpx/apu/xemu-audio-log.c` |
 
 Never time fps with `*_REFUTE`, `XEMU_X87_CENSUS`, `XEMU_GUEST_PROF` or
 `XEMU_MMIO_PROF` set.
@@ -366,7 +367,7 @@ Never time fps with `*_REFUTE`, `XEMU_X87_CENSUS`, `XEMU_GUEST_PROF` or
 | `audio.use_dsp_jit` | true | Upstream's JIT. The fork owns this default (upstream ships false); re-check it after merges |
 | `display.window.presentation_backend` | auto | Metal under Vulkan; restart to change |
 | `display.vulkan.driver` | auto | macOS arm64: Auto runs MoltenVK; `kosmickrisp` opts in to KosmicKrisp on macOS 26 (Metal 4, Metal presentation), else or on failure (or after a strike, until picked again) MoltenVK; icount and offscreen pin MoltenVK; restart to change |
-| `automation.ram_shm`, `.qmp`, `.enabled` | "", "", true | The player's tracker endpoints (as `XEMU_RAM_SHM`, `-qmp`); applied only to the pref dir's config with no `-config_path`, `XEMU_BASE_PATH` or marker (README) |
+| `automation.ram_shm`, `.qmp`, `.enabled` | "", "", true | The player's tracker endpoints (as `XEMU_RAM_SHM`, `-qmp`); applied only to the pref dir's config with no `-config_path`, `XEMU_BASE_PATH` or marker (`docs/automation.md`) |
 
 Add a knob only for a normal-mode change the det goldens can't verify, a
 diagnostic, a harness interface or a user tuning knob (CLAUDE.md). Read

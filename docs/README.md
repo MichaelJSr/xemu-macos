@@ -1,52 +1,76 @@
 # Fork documentation
 
 Most of `docs/` is upstream QEMU's Sphinx tree (`*.rst`, `*.txt`,
-`conf.py`, `devel/`, `system/`, ...). The fork leaves it alone so
-upstream merges stay clean. The fork's own documents are the Markdown
-files indexed here; Sphinx builds `.rst` only, so they never reach the
-QEMU manual.
-
-Agent-facing operating knowledge lives in three lean skills under
+`conf.py`, `about/`, `devel/`, `system/`, ...); the fork leaves it alone
+so upstream merges stay clean. The fork's own docs are the Markdown
+files below. Agent operating knowledge lives in the skills under
 [`.claude/skills/`](../.claude/skills/) (xemu-operate, xemu-internals,
-xemu-history), not here.
+xemu-history).
 
-## Where a fork doc goes
+## User docs
 
-| Folder | Holds | Leaves when |
-|---|---|---|
-| `docs/` (root) | Living documents of record, kept current as the code changes. Each has to say why it is here (next table). | It stops being maintained: move it to `Finished/` |
-| [`Campaigns/`](Campaigns/) | Multi-session work in progress: designs with open phases, campaign status, their backlogs. A paused campaign stays here with a dated status line. | Every phase lands or is closed: `Finished/` |
-| [`Future/`](Future/) | Proposals and parked experiments with a real write-up that nobody is working on. A one-paragraph candidate belongs in `roadmap.md` instead. | Work starts: `Campaigns/`. Killed: `Finished/`, with the reason |
-| [`Finished/`](Finished/) | Closed records: landed designs, audits, verdicts, reviews. Bodies stay as written; a status line under the title gives the outcome, date, landing commit and where any follow-up lives. | Never. A reopened topic gets a new `Campaigns/` doc that links back |
+- [`../README.md`](../README.md): what the fork changes, download,
+  requirements, the recommended `xemu.toml`, credits.
+- [`troubleshooting.md`](troubleshooting.md): problems players hit, and
+  the settings that trade quality for speed.
+- [`kosmickrisp.md`](kosmickrisp.md): the opt-in KosmicKrisp Vulkan
+  driver: selection, strike marker, `XEMU_VK_DRIVER`, the Auto-back gate.
 
-## Root documents
+## Developer and release docs
 
-| Doc | Why it is at the root |
-|---|---|
-| [`optimizations.md`](optimizations.md) | The optimization ledger: every landed change with receipts, the runtime knob catalog, Failed / reverted experiments, Settled vectors. Every landing updates it. |
-| [`roadmap.md`](roadmap.md) | The open candidates, each with its decision inputs and bar. Closed entries leave it for the ledger and `Finished/`. |
-| [`RELEASING-macos.md`](RELEASING-macos.md) | The release runbook, used every release. |
-| [`windows-gating-audit.md`](windows-gating-audit.md) | The cross-platform gating register and the list of changes that still need real-hardware validation. The release runbook and roadmap item 5 depend on it. |
-| [`windows-test-plan.md`](windows-test-plan.md) | The runbook for real-Windows-hardware sessions: CLAUDE.md's rules mapped to Windows paths and tools, the kit setup and helpers, the test blocks (smoke, the fork's Windows paths, deterministic goldens, performance, Roswell) and the results template. CLAUDE.md sends Windows sessions to it; the gating audit records its runs. |
-| [`kosmickrisp.md`](kosmickrisp.md) | KosmicKrisp, the opt-in Vulkan driver on macOS 26 beside the default MoltenVK: how the driver is chosen, the strike marker, `XEMU_VK_DRIVER`, building KK, the gate and its v0.16 results, what flips Auto back, open items and the measurements. |
-| `README.md` | This index. |
+- [`building.md`](building.md): building on macOS, Windows and Linux,
+  build knobs, how Vulkan is loaded at runtime, build failures.
+- [`automation.md`](automation.md): the harness interface: headless
+  modes, QMP commands and events, input pipe, deterministic mode,
+  gdbstub, `XEMU_*` variables, PAL 50 Hz, guest RAM.
+- [`optimizations.md`](optimizations.md): the ledger: every landed
+  change with its receipt, the `XEMU_*` knob catalog, failed and
+  settled experiments. Every landing updates it.
+- [`roadmap.md`](roadmap.md): open candidates with their bars; closed
+  ones move to the ledger and `Finished/`.
+- [`RELEASING-macos.md`](RELEASING-macos.md): the release runbook.
+- [`windows-gating-audit.md`](windows-gating-audit.md): fork changes
+  that Windows compiles, and what still needs real Windows hardware.
+- [`windows-test-plan.md`](windows-test-plan.md): the runbook for
+  real-Windows-hardware sessions; CLAUDE.md sends Windows sessions here.
 
-## Campaigns
+## Records of finished work (`Finished/`)
 
-- [`windows-port-2026-09.md`](Campaigns/windows-port-2026-09.md): the native Windows port: setup recipe, the 2026-09 session, and the audit batch plan with per-batch status (2026-10-18); the live Windows debt is in `windows-gating-audit.md` §W.
-- [`windows-audit-2026-09-summary.md`](Campaigns/windows-audit-2026-09-summary.md) and its source data [`windows-audit-2026-09.json`](Campaigns/windows-audit-2026-09.json): the port's audit backlog (2026-09-07 snapshot).
+A closed record keeps its body as written; a status line under the
+title gives the outcome, date, landing commit and where any follow-up
+lives.
 
-## Future
+- [`dsp-jit-design.md`](Finished/dsp-jit-design.md): the ARM64 DSP56300
+  JIT design; every phase landed. Template for new design docs.
+- [`fork-optimization-audit-2026-08.md`](Finished/fork-optimization-audit-2026-08.md):
+  the fork-wide optimization audit, closed 2026-08-04.
+- [`lockless-mmio-verdict.md`](Finished/lockless-mmio-verdict.md):
+  BQL-free dispatch for the remaining MMIO blocks; closed, do not build.
+- [`pgraph-lockless-audit.md`](Finished/pgraph-lockless-audit.md):
+  BQL-free PGRAPH MMIO dispatch, shipped 2026-07-11.
+- [`roadmap-closed-items.md`](Finished/roadmap-closed-items.md): write-ups
+  of closed and parked roadmap candidates.
+- [`subpage-gate0-prediction.md`](Finished/subpage-gate0-prediction.md):
+  sub-page dirty tracking, from sizing to results; shipped 2026-07-11
+  and 2026-07-18.
+- [`windows-port-2026-09.md`](Finished/windows-port-2026-09.md): the
+  native Windows port to its 2026-10-18 merge, with the audit summary.
+- [`windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md):
+  review of the Windows wave-1 work, closed with v0.13.3.
+- [`xpage-design.md`](Finished/xpage-design.md): cross-page TB chaining
+  soundness design, shipped 2026-07-11.
 
-- [`moltenvk-optimization-experiments.md`](Future/moltenvk-optimization-experiments.md): the MoltenVK private-API build, still unbuilt, and the pipeline prewarm experiment, shipped 2026-10-24 (its parallel compile of first-use bursts closed by its gate).
+## Proposals (`Future/`)
 
-## Finished
+Proposals with a real write-up that nobody is working on; a
+one-paragraph candidate goes in `roadmap.md` instead.
 
-- [`dsp-jit-design.md`](Finished/dsp-jit-design.md): the ARM64 DSP56300 JIT design and phased roadmap; every phase landed. Also the template for new design docs.
-- [`fork-optimization-audit-2026-08.md`](Finished/fork-optimization-audit-2026-08.md): the fork-wide optimization audit, closed 2026-08-04.
-- [`lockless-mmio-verdict.md`](Finished/lockless-mmio-verdict.md): BQL-free dispatch for the remaining MMIO blocks. Closed, do not build.
-- [`pgraph-lockless-audit.md`](Finished/pgraph-lockless-audit.md): BQL-free PGRAPH MMIO dispatch, shipped 2026-07-11.
-- [`roadmap-closed-items.md`](Finished/roadmap-closed-items.md): full write-ups of closed and parked roadmap candidates.
-- [`subpage-gate0-prediction.md`](Finished/subpage-gate0-prediction.md): sub-page dirty tracking, from sizing to results, with the original design as an appendix. Shipped 2026-07-11 and 2026-07-18.
-- [`windows-wave1-review-2026-09-08.md`](Finished/windows-wave1-review-2026-09-08.md): review of the Windows wave-1 work, closed with v0.13.3.
-- [`xpage-design.md`](Finished/xpage-design.md): cross-page TB chaining soundness design, shipped 2026-07-11.
+- [`moltenvk-optimization-experiments.md`](Future/moltenvk-optimization-experiments.md):
+  the unbuilt MoltenVK private-API build, and the pipeline prewarm
+  experiment (shipped 2026-10-24).
+
+## Formal models (`spin/`)
+
+- [`spin/`](spin/): upstream QEMU's SPIN (Promela) models of
+  `aio_notify`, TCG exclusive sections and the Win32 `QemuEvent`. The
+  fork does not edit them.
