@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
-#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -60,7 +59,10 @@ void CollectImages(const fs::path &dir, int depth, std::vector<fs::path> &out)
     }
     bool extracted_game = false;
     std::vector<fs::path> here, subdirs;
-    for (const fs::directory_entry &e : it) {
+    // increment(ec), not the range-for's throwing ++: readdir can fail
+    // mid-listing (a network share that drops)
+    for (fs::directory_iterator end; !ec && it != end; it.increment(ec)) {
+        const fs::directory_entry &e = *it;
         std::string name = Lower(e.path().filename().u8string());
         if (!name.empty() && name[0] == '.') {
             continue; // skip hidden entries (.Trash, .DS_Store, ...)
@@ -92,25 +94,21 @@ fs::path IndexPath(const std::string &base_path)
     return fs::u8path(base_path) / "game-library.json";
 }
 
-} // namespace
-
-int GameLibraryScan(const std::string &dir, std::string &error)
+int ScanDir(const std::string &dir, const std::vector<LibraryGame> &previous,
+            std::vector<LibraryGame> &out, std::string &error)
 {
-    error.clear();
-    g_dir = dir;
-
-    // The current list seeds the cache: an image whose size and mtime are
+    // The previous list seeds the cache: an image whose size and mtime are
     // unchanged keeps its metadata and is not opened again.
     std::map<std::string, LibraryGame> cache;
-    for (const LibraryGame &g : g_games) {
+    for (const LibraryGame &g : previous) {
         cache[g.path] = g;
     }
 
-    if (dir.empty() || !fs::is_directory(fs::u8path(dir))) {
+    std::error_code dec;
+    if (dir.empty() || !fs::is_directory(fs::u8path(dir), dec)) {
         error = dir.empty() ? "No games folder is configured" :
-                              "The games folder does not exist";
-        g_games.clear();
-        g_scanned_at = 0;
+                              "The games folder does not exist or cannot be "
+                              "read";
         return 0;
     }
 
@@ -164,9 +162,35 @@ int GameLibraryScan(const std::string &dir, std::string &error)
                   return a.path < b.path;
               });
 
-    g_games = std::move(found);
-    g_scanned_at = (int64_t)time(nullptr);
-    return (int)g_games.size();
+    out = std::move(found);
+    return (int)out.size();
+}
+
+} // namespace
+
+int GameLibraryScanDir(const std::string &dir,
+                       const std::vector<LibraryGame> &previous,
+                       std::vector<LibraryGame> &out, std::string &error)
+{
+    error.clear();
+    out.clear();
+    try {
+        return ScanDir(dir, previous, out, error);
+    } catch (const std::exception &ex) {
+        // Path conversions (Windows) and allocation can still throw, and
+        // this runs on a worker thread where nothing else would catch it
+        out.clear();
+        error = ex.what();
+        return 0;
+    }
+}
+
+void GameLibrarySetGames(const std::string &dir,
+                         std::vector<LibraryGame> games, int64_t scanned_at)
+{
+    g_dir = dir;
+    g_games = std::move(games);
+    g_scanned_at = scanned_at;
 }
 
 const std::vector<LibraryGame> &GameLibraryGames(void)
@@ -190,40 +214,49 @@ void GameLibraryLoadIndex(const std::string &base_path)
     if (!f) {
         return;
     }
-    json j;
+    // A damaged index leaves the list as it was and a mistyped entry
+    // (value() throws on a wrong type) is skipped; the next scan rewrites
+    // the file.
+    std::string dir;
+    int64_t scanned_at = 0;
+    std::vector<LibraryGame> games;
     try {
+        json j;
         f >> j;
-    } catch (...) {
-        return; // a damaged index is rebuilt by the next scan
-    }
-    if (!j.is_object()) {
+        if (!j.is_object()) {
+            return;
+        }
+        dir = j.value("dir", std::string());
+        scanned_at = j.value("scanned_at", (int64_t)0);
+
+        for (const json &e : j.value("games", json::array())) {
+            if (!e.is_object()) {
+                continue;
+            }
+            LibraryGame g;
+            try {
+                g.path = e.value("path", std::string());
+                if (g.path.empty()) {
+                    continue;
+                }
+                g.size = e.value("size", (uint64_t)0);
+                g.mtime = e.value("mtime", (int64_t)0);
+                g.title = e.value("title", std::string());
+                g.title_id = e.value("title_id", std::string());
+                g.region = e.value("region", std::string());
+                g.error = e.value("error", std::string());
+                g.title_id_raw = e.value("title_id_raw", 0u);
+                g.region_raw = e.value("region_raw", 0u);
+                g.valid = e.value("valid", false);
+            } catch (const json::exception &) {
+                continue;
+            }
+            games.push_back(std::move(g));
+        }
+    } catch (const std::exception &) {
         return;
     }
-    g_dir = j.value("dir", std::string());
-    g_scanned_at = j.value("scanned_at", (int64_t)0);
-
-    std::vector<LibraryGame> games;
-    for (const json &e : j.value("games", json::array())) {
-        if (!e.is_object()) {
-            continue;
-        }
-        LibraryGame g;
-        g.path = e.value("path", std::string());
-        if (g.path.empty()) {
-            continue;
-        }
-        g.size = e.value("size", (uint64_t)0);
-        g.mtime = e.value("mtime", (int64_t)0);
-        g.title = e.value("title", std::string());
-        g.title_id = e.value("title_id", std::string());
-        g.region = e.value("region", std::string());
-        g.error = e.value("error", std::string());
-        g.title_id_raw = e.value("title_id_raw", 0u);
-        g.region_raw = e.value("region_raw", 0u);
-        g.valid = e.value("valid", false);
-        games.push_back(std::move(g));
-    }
-    g_games = std::move(games);
+    GameLibrarySetGames(dir, std::move(games), scanned_at);
 }
 
 void GameLibrarySaveIndex(const std::string &base_path)
@@ -252,9 +285,17 @@ void GameLibrarySaveIndex(const std::string &base_path)
     }
     j["games"] = std::move(games);
 
+    // Serialize first, so a failure can't truncate the old index. replace:
+    // Linux file names need not be UTF-8, and strict dump() throws on them.
+    std::string text;
+    try {
+        text = j.dump(2, ' ', false, json::error_handler_t::replace);
+    } catch (const std::exception &) {
+        return;
+    }
     std::ofstream f(IndexPath(base_path), std::ios::binary);
     if (!f) {
         return;
     }
-    f << j.dump(2);
+    f << text;
 }

@@ -690,43 +690,6 @@ JmpFit CheckJmp(const JmpPatch &patch, const std::vector<uint8_t> &stock_xbe,
     return JmpFit::Unverified;
 }
 
-bool JmpOptionIs60Fps(const JmpOption &option)
-{
-    if (option.other_xbe) {
-        return false;
-    }
-    std::string n;
-    for (char c : option.name) {
-        n += (char)tolower((unsigned char)c);
-    }
-    size_t i = n.find_first_not_of(" \t");
-    if (i == std::string::npos) {
-        return false;
-    }
-    // "1. 768x672 render, 60FPS VSync..." style presets pick a whole video
-    // mode; leave those to the Patches window
-    size_t d = i;
-    while (d < n.size() && isdigit((unsigned char)n[d])) {
-        d++;
-    }
-    if (d > i && d < n.size() && n[d] == '.') {
-        return false;
-    }
-    for (size_t p = n.find("60"); p != std::string::npos; p = n.find("60", p + 1)) {
-        if (p > 0 && isdigit((unsigned char)n[p - 1])) {
-            continue;
-        }
-        size_t q = p + 2;
-        while (q < n.size() && (n[q] == ' ' || n[q] == '-')) {
-            q++;
-        }
-        if (n.compare(q, 3, "fps") == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
 const char *JmpFitLabel(JmpFit fit)
 {
     switch (fit) {
@@ -742,17 +705,6 @@ const char *JmpFitLabel(JmpFit fit)
         return "Not supported";
     }
     return "";
-}
-
-bool ApplyPatchFiles(const std::vector<uint8_t> &original,
-                     const std::vector<std::string> &patch_paths,
-                     std::vector<uint8_t> &patched, std::string &error)
-{
-    std::vector<PatchSpec> specs;
-    for (auto &p : patch_paths) {
-        specs.push_back({ p, {} });
-    }
-    return ApplyPatchFiles(original, specs, patched, error);
 }
 
 bool ApplyPatchFiles(const std::vector<uint8_t> &original,
@@ -979,17 +931,6 @@ bool ReadDefaultXbe(const std::string &image_path, std::vector<uint8_t> &xbe,
     XbeLocation loc;
     return LocateDefaultXbe(image_path, loc, error) &&
            ReadXbeAt(image_path, loc, xbe, error);
-}
-
-bool BuildPatchedOverlay(const std::string &image_path,
-                         const std::vector<std::string> &patch_paths,
-                         const std::string &overlay_path, std::string &error)
-{
-    std::vector<PatchSpec> specs;
-    for (auto &p : patch_paths) {
-        specs.push_back({ p, {} });
-    }
-    return BuildPatchedOverlay(image_path, specs, overlay_path, error);
 }
 
 bool BuildPatchedOverlay(const std::string &image_path,

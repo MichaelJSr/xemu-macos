@@ -3237,6 +3237,21 @@ void xemu_eject_disc(Error **errp)
     xbox_smc_update_tray_state();
 }
 
+/*
+ * Patched-disc overlays (ui/xui/game-patches.cc) are qcow2 over the game's
+ * image; everything else opens raw. Chosen by extension, not by probing, so
+ * a raw image can't pass for a qcow2 that names a backing file.
+ */
+static const char *xemu_disc_image_format(const char *path)
+{
+    size_t len = strlen(path);
+
+    if (len >= 6 && !g_ascii_strcasecmp(path + len - 6, ".qcow2")) {
+        return "qcow2";
+    }
+    return "raw";
+}
+
 void xemu_load_disc(const char *path, Error **errp)
 {
     Error *error = NULL;
@@ -3245,7 +3260,8 @@ void xemu_load_disc(const char *path, Error **errp)
      * The change opens the new image before it takes the old one out, so
      * a failure leaves the tray, the config and the SMC as they were.
      */
-    qmp_blockdev_change_medium("ide0-cd1", NULL, path, "raw", false, false,
+    qmp_blockdev_change_medium("ide0-cd1", NULL, path,
+                               xemu_disc_image_format(path), false, false,
                                false, 0, &error);
     if (error) {
         error_propagate(errp, error);

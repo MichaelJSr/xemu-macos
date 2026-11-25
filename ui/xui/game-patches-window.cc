@@ -21,11 +21,11 @@
 
 #include "common.hh"
 #include "IconsFontAwesome6.h"
-#include "actions.hh"
 #include "disc-image.hh"
 #include "game-patches.hh"
 #include "misc.hh"
 #include "viewport-manager.hh"
+#include "xemu-hud.h"
 #include "../xemu-notifications.h"
 
 // The interface is English-only here (this fork has no translation layer):
@@ -93,37 +93,6 @@ std::string I64(int64_t v)
     char buf[24];
     snprintf(buf, sizeof(buf), "%lld", (long long)v);
     return buf;
-}
-
-std::string FormatTitleId(uint32_t id)
-{
-    char a = (char)((id >> 24) & 0xFF), b = (char)((id >> 16) & 0xFF);
-    char buf[32];
-    if (isalnum((unsigned char)a) && isalnum((unsigned char)b)) {
-        snprintf(buf, sizeof(buf), "%c%c-%03u", a, b, id & 0xFFFF);
-    } else {
-        snprintf(buf, sizeof(buf), "%08X", id);
-    }
-    return buf;
-}
-
-std::string FormatRegion(uint32_t region)
-{
-    region &= 0x7;
-    if (region == 0x7) {
-        return "Region free";
-    }
-    std::string s;
-    if (region & 0x1) {
-        s += "NTSC-U";
-    }
-    if (region & 0x2) {
-        s += s.empty() ? "NTSC-J" : ", NTSC-J";
-    }
-    if (region & 0x4) {
-        s += s.empty() ? "PAL" : ", PAL";
-    }
-    return s.empty() ? "Unknown region" : s;
 }
 
 fs::path PatchDir(uint32_t title_id)
@@ -212,7 +181,8 @@ void SaveOverlayMap()
     }
     std::ofstream f(OverlayMapPath(), std::ios::trunc);
     if (f) {
-        f << j.dump(2);
+        // replace: a non-UTF-8 path (Linux) would otherwise throw
+        f << j.dump(2, ' ', false, json::error_handler_t::replace);
     }
 }
 
@@ -251,7 +221,7 @@ void SavePatches()
     j["patches"] = arr;
     std::ofstream f(PatchesMetaPath(g_info.title_id), std::ios::trunc);
     if (f) {
-        f << j.dump(2);
+        f << j.dump(2, ' ', false, json::error_handler_t::replace);
     }
 }
 
@@ -274,7 +244,10 @@ void SyncPatches()
                 }
                 PatchItem pi;
                 pi.file = o["file"].get<std::string>();
-                pi.enabled = o.value("enabled", true);
+                // value() would throw on a non-boolean; default to on
+                auto en = o.find("enabled");
+                pi.enabled = en == o.end() || !en->is_boolean() ||
+                             en->get<bool>();
                 if (o.contains("toggled") && o["toggled"].is_array()) {
                     for (auto &t : o["toggled"]) {
                         if (t.is_number_integer()) {
@@ -516,7 +489,22 @@ void BuildAndLoad()
         return;
     }
     int n = EnabledPatchCount();
-    ActionLoadDiscFile(load.c_str());
+    // Not ActionLoadDiscFile: it would make the overlay's folder (the
+    // internal patched-discs) the games folder. Seed it from the original.
+    Error *err = NULL;
+    xemu_load_disc(load.c_str(), &err);
+    if (err) {
+        g_status_ok = false;
+        g_status = error_get_pretty(err);
+        xemu_queue_error_message(error_get_pretty(err));
+        error_free(err);
+        return;
+    }
+    const char *games_dir = g_config.general.games_dir;
+    if (!games_dir || !games_dir[0]) {
+        std::string dir = fs::u8path(g_image).parent_path().u8string();
+        xemu_settings_set_string(&g_config.general.games_dir, dir.c_str());
+    }
     g_status_ok = true;
     g_status = n ? string_format(tr("Loaded the patched disc (%d patch(es))."),
                                  n)

@@ -142,6 +142,9 @@ std::string Utf16ToUtf8(const uint8_t *p, size_t max_chars)
                 i++;
             }
         }
+        if (c >= 0xD800 && c <= 0xDFFF) {
+            c = 0xFFFD; // unpaired surrogate: not encodable as UTF-8
+        }
         if (c < 0x80) {
             out += (char)c;
         } else if (c < 0x800) {

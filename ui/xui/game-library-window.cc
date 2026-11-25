@@ -22,6 +22,10 @@
 #include "game-library.hh"
 #include "viewport-manager.hh"
 
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -86,16 +90,116 @@ const LibraryGame *FindSelected()
     return nullptr;
 }
 
+// A scan runs on its own thread: a big tree or a network share can take
+// seconds, and the HUD runs holding the BQL. The UI thread and the worker
+// share the job, and whichever lets go last frees it, so a scan still
+// running at exit touches nothing freed and exit never waits for it.
+struct ScanJob {
+    GMutex lock;
+    gint refs = 2;
+    std::string dir; // set before the thread starts, then read-only
+    std::vector<LibraryGame> previous;
+    bool done = false; // the rest is under lock
+    std::vector<LibraryGame> result;
+    std::string error;
+    int64_t scanned_at = 0;
+};
+ScanJob *g_job; // the scan in flight, UI thread only
+
+void ScanJobUnref(ScanJob *job)
+{
+    if (g_atomic_int_dec_and_test(&job->refs)) {
+        g_mutex_clear(&job->lock);
+        delete job;
+    }
+}
+
+gpointer ScanThread(gpointer opaque)
+{
+    ScanJob *job = (ScanJob *)opaque;
+#ifdef __APPLE__
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
+    std::vector<LibraryGame> games;
+    std::string error;
+    GameLibraryScanDir(job->dir, job->previous, games, error);
+    g_mutex_lock(&job->lock);
+    job->result = std::move(games);
+    job->error = std::move(error);
+    job->scanned_at = (int64_t)time(nullptr);
+    job->done = true;
+    g_mutex_unlock(&job->lock);
+    ScanJobUnref(job);
+    return nullptr;
+}
+
 void Rescan()
 {
+    if (g_job) {
+        return;
+    }
     const char *dir = g_config.general.games_dir;
-    std::string err;
-    int n = GameLibraryScan(dir ? dir : "", err);
+    ScanJob *job = new ScanJob;
+    g_mutex_init(&job->lock);
+    job->dir = dir ? dir : "";
+    job->previous = GameLibraryGames();
+    GError *gerr = nullptr;
+    GThread *t = g_thread_try_new("gamelib-scan", ScanThread, job, &gerr);
+    if (!t) {
+        g_status = std::string("Could not start the scan: ") + gerr->message;
+        g_status_ok = false;
+        g_error_free(gerr);
+        g_mutex_clear(&job->lock);
+        delete job;
+        return;
+    }
+    g_thread_unref(t); // detached
+    g_job = job;
+    g_status = "Scanning...";
+    g_status_ok = true;
+}
+
+// Take a finished scan's result, on the UI thread
+void PollScan()
+{
+    if (!g_job) {
+        return;
+    }
+    std::string dir, err;
+    std::vector<LibraryGame> games;
+    int64_t at = 0;
+    g_mutex_lock(&g_job->lock);
+    bool done = g_job->done;
+    if (done) {
+        dir = g_job->dir;
+        games = std::move(g_job->result);
+        err = std::move(g_job->error);
+        at = g_job->scanned_at;
+    }
+    g_mutex_unlock(&g_job->lock);
+    if (!done) {
+        return;
+    }
+    ScanJobUnref(g_job);
+    g_job = nullptr;
+
+    const char *want = g_config.general.games_dir;
+    if (dir != (want ? want : "")) {
+        // The games folder changed while it ran
+        g_status.clear();
+        if (g_window_open) {
+            Rescan();
+        }
+        return;
+    }
     if (!err.empty()) {
+        GameLibrarySetGames(dir, {}, 0);
         g_status = err;
         g_status_ok = false;
         return;
     }
+    int n = (int)games.size();
+    GameLibrarySetGames(dir, std::move(games), at);
     GameLibrarySaveIndex(BasePath().u8string());
     char buf[64];
     snprintf(buf, sizeof(buf), "Found %d game%s", n, n == 1 ? "" : "s");
@@ -127,9 +231,11 @@ void DrawWindow()
     ImGui::SetItemTooltip("The folder scanned for .iso / .xiso images. Set it "
                           "in Settings > General.");
 
+    ImGui::BeginDisabled(g_job != nullptr);
     if (ImGui::Button(ICON_FA_ARROWS_ROTATE "  Rescan")) {
         Rescan();
     }
+    ImGui::EndDisabled();
     ImGui::SetItemTooltip("Look for disc images again. Images whose size and "
                           "modification time are unchanged are not re-read.");
     ImGui::SameLine();
@@ -216,7 +322,9 @@ void DrawWindow()
         }
         ImGui::EndTable();
 
-        if (shown == 0) {
+        if (shown == 0 && games.empty() && g_job) {
+            // The status line already says "Scanning..."
+        } else if (shown == 0) {
             ImGui::TextDisabled(games.empty() ?
                                     "No games found. Check the games folder "
                                     "in Settings > General." :
@@ -243,12 +351,15 @@ void DrawWindow()
 
 void GameLibraryOpenWindow(void)
 {
-    GameLibraryLoadIndex(BasePath().u8string());
+    // A scan in flight replaces the list when it lands
+    if (!g_job) {
+        GameLibraryLoadIndex(BasePath().u8string());
 
-    const char *dir = g_config.general.games_dir;
-    std::string want = dir ? dir : "";
-    if (GameLibraryGames().empty() || GameLibraryDirectory() != want) {
-        Rescan();
+        const char *dir = g_config.general.games_dir;
+        std::string want = dir ? dir : "";
+        if (GameLibraryGames().empty() || GameLibraryDirectory() != want) {
+            Rescan();
+        }
     }
 
     g_window_open = true;
@@ -257,6 +368,7 @@ void GameLibraryOpenWindow(void)
 
 void GameLibraryWindowDraw(void)
 {
+    PollScan(); // also while closed, so a scan always lands
     if (!g_window_open) {
         return;
     }

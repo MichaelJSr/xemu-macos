@@ -32,5 +32,5 @@ bool ReadDiscInfo(const std::string &image_path, DiscInfo &out);
 // "MS-004" style title id string
 std::string FormatTitleId(uint32_t title_id);
 
-// "NTSC-U", "PAL", "NTSC-J / NTSC-U", "Region free", ...
+// "NTSC-U", "PAL", "NTSC-U / NTSC-J", "Region free", ...
 std::string FormatRegion(uint32_t region);

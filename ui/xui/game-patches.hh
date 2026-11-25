@@ -88,10 +88,6 @@ JmpFit CheckJmp(const JmpPatch &patch, const std::vector<uint8_t> &stock_xbe,
                 uint32_t title_id);
 const char *JmpFitLabel(JmpFit fit);
 
-// Is this option a 60 FPS patch? ("60 FPS", "60FPS", "HUD fix & 60FPS"...,
-// but not numbered render-mode presets or options for other XBEs)
-bool JmpOptionIs60Fps(const JmpOption &option);
-
 struct PatchSpec {
     std::string path;
     std::vector<int> toggled; // .jmp: option indices flipped from default
@@ -100,9 +96,6 @@ struct PatchSpec {
 // Apply patch files (by extension) to an XBE, in order.
 bool ApplyPatchFiles(const std::vector<uint8_t> &original,
                      const std::vector<PatchSpec> &patches,
-                     std::vector<uint8_t> &patched, std::string &error);
-bool ApplyPatchFiles(const std::vector<uint8_t> &original,
-                     const std::vector<std::string> &patch_paths,
                      std::vector<uint8_t> &patched, std::string &error);
 
 // Read the game's unmodified default.xbe from a disc image
@@ -122,9 +115,6 @@ bool WriteQcow2Overlay(
 // original occupies on the disc.
 bool BuildPatchedOverlay(const std::string &image_path,
                          const std::vector<PatchSpec> &patches,
-                         const std::string &overlay_path, std::string &error);
-bool BuildPatchedOverlay(const std::string &image_path,
-                         const std::vector<std::string> &patch_paths,
                          const std::string &overlay_path, std::string &error);
 
 uint32_t Crc32(const uint8_t *data, size_t len);

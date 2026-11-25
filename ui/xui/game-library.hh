@@ -29,11 +29,18 @@ struct LibraryGame {
     bool valid = false; // the certificate was read
 };
 
-// Scans `dir` recursively for .iso / .xiso images and reads their titles,
-// reusing the cached metadata for images whose size and mtime are unchanged.
-// Returns the number of games found; on failure `error` is set and the list
-// is left empty.
-int GameLibraryScan(const std::string &dir, std::string &error);
+// Scans `dir` recursively for .iso / .xiso images into `out` (title order)
+// and reads their titles, reusing the metadata in `previous` for images
+// whose size and mtime are unchanged. Touches no library state and catches
+// its own exceptions, so it may run on a worker thread. Returns the number
+// of games found; on failure `error` is set and `out` is left empty.
+int GameLibraryScanDir(const std::string &dir,
+                       const std::vector<LibraryGame> &previous,
+                       std::vector<LibraryGame> &out, std::string &error);
+
+// Replace the list with a scan's result (UI thread).
+void GameLibrarySetGames(const std::string &dir,
+                         std::vector<LibraryGame> games, int64_t scanned_at);
 
 // The games found by the last scan, or loaded from the index (title order).
 const std::vector<LibraryGame> &GameLibraryGames(void);

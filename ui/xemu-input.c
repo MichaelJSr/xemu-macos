@@ -1650,9 +1650,10 @@ static void kbd_pad_state(ControllerState *state, const bool *kbd,
  */
 static void xemu_input_apply_deadzone(int16_t *x, int16_t *y, float dz)
 {
-    if (dz <= 0.0f) {
+    if (!(dz > 0.0f)) { /* also NaN from a hand-edited toml */
         return;
     }
+    dz = fminf(dz, 0.95f); /* keep 1 - dz away from 0 */
 
     const float full = 32767.0f;
     float fx = *x, fy = *y;
@@ -1664,7 +1665,13 @@ static void xemu_input_apply_deadzone(int16_t *x, int16_t *y, float dz)
         return;
     }
 
+    /*
+     * Diagonals (mag up to 1.414) and -32768 rescale past full range; cap
+     * the scale so the larger component lands at full deflection, keeping
+     * the direction and staying inside int16.
+     */
     float scale = (mag - dz) / ((1.0f - dz) * mag);
+    scale = fminf(scale, full / fmaxf(fabsf(fx), fabsf(fy)));
     *x = (int16_t)(fx * scale);
     *y = (int16_t)(fy * scale);
 }
