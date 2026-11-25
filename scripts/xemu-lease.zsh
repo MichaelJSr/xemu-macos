@@ -1,6 +1,6 @@
 # Sourced by the zsh benches: how an automated xemu launch identifies
-# itself. Python twin and the full contract: scripts/xemu_lease.py (keep
-# the two in step).
+# itself. Python twin and the full contract: scripts/xemu_lease.py (the
+# AUTOMATION_ENV list lives there only).
 #
 #   $XEMU_NICE  (nice -n 10)               prefix of every automated launch
 #   $XEMU_MARK  (-name xemu-fork-auto)     first arguments after the binary
@@ -8,13 +8,27 @@
 #   xemu_slot_acquire                      wait for one of $XEMU_FORK_SLOTS (4):
 #                                          flock(2) on an fd the next xemu inherits;
 #                                          first waits while an owner-demo.json names a
-#                                          live pid (XEMU_OWNER_DEMO_WAIT=0: exit 75)
+#                                          live pid (XEMU_OWNER_DEMO_WAIT=0: exit 75);
+#                                          each minute of waiting names the holders
+#                                          past their expected end
 #   xemu_lease_write <pid> <purpose> <s>   lease for the xemu just started, which
-#                                          now holds the slot alone (until it exits)
+#                                          now holds the slot alone (until it exits);
+#                                          also takes that pid out of PRIO_DARWIN_BG
 #   xemu_auto_end                          drop that lease (and a slot not handed on)
-#   (sourcing it)                          unsets the inherited $XEMU_AUTOMATION_ENV
+#   xemu_wait_ready <log> <pid> [binary] [settle s=5]
+#                                          return once <log> has `xemu: ready`, then
+#                                          settle seconds more; 1 if the pid exits or
+#                                          no line comes in $XEMU_READY_TIMEOUT (120) s.
+#                                          A binary older than that line (4fb1afb755,
+#                                          2026-10-13) waits 20 s + settle instead
+#   (sourcing it)                          takes this shell out of PRIO_DARWIN_BG
+#                                          (taskpolicy -B: an agent's shell can sit at
+#                                          PRI 4, where a 7.5 s run took 37 min), and
+#                                          unsets the inherited $XEMU_AUTOMATION_ENV
 #   xemu_bench_cache <xemu binary> <isolate 0|1>
-#       sets XEMU_BENCH_BASE, the data base path the run passes as
+#       refuses (exit 2) a binary inside this checkout's dist/ (the
+#       owner's bundle: launch a clone). Sets XEMU_BENCH_BASE, the data
+#       base path the run passes as
 #       XEMU_BASE_PATH, and XEMU_BENCH_PORTABLE=1 when the caller must
 #       plant its scratch config in the clone's Contents/Resources: for
 #       --isolate-caches, and for a binary that predates XEMU_BASE_PATH
@@ -26,19 +40,26 @@
 zmodload zsh/datetime
 setopt no_bg_nice   # background launches get exactly nice 10, not zsh's +5 on top
 XEMU_LEASE_DIR=${XEMU_LEASE_DIR:-/tmp/xemu-leases}
+XEMU_LEASE_PY=${${(%):-%x}:A:h}/xemu_lease.py
+XEMU_REPO_ROOT=${${(%):-%x}:A:h:h}
+# Nice 10 stays; PRIO_DARWIN_BG goes, here and on each xemu (xemu_lease_write).
+() {
+  (( $+commands[taskpolicy] )) || return 0
+  local pri=${$(ps -o pri= -p $$ 2>/dev/null)//[^0-9]/}
+  taskpolicy -B -p $$ 2>/dev/null || return 0
+  [[ -n $pri ]] && (( pri <= 4 )) && echo "lease: launcher was at PRIO_DARWIN_BG (PRI $pri); cleared" >&2
+  return 0
+}
 # The lease folder's owner-demo.json and, always, the harness's: a moved
 # lease folder has its own leases and slots, never its own demo guard.
 typeset -gaU XEMU_OWNER_DEMO_FILES=($XEMU_LEASE_DIR/owner-demo.json /tmp/xemu-leases/owner-demo.json)
 XEMU_NICE=(nice -n 10)
 XEMU_MARK=(-name xemu-fork-auto)
 typeset -g XEMU_SLOT="" XEMU_SLOT_FD="" XEMU_LEASE_PID="" XEMU_BENCH_BASE="" XEMU_BENCH_PORTABLE=0
-# An automated xemu never inherits these (AUTOMATION_ENV in xemu_lease.py):
+# An automated xemu never inherits these (xemu_lease.py's AUTOMATION_ENV):
 # the caller passes them per run (VAR=V arguments, --b-env/--e-env).
-XEMU_AUTOMATION_ENV=(XEMU_RAM_SHM XEMU_INPUT_PIPE XEMU_INPUT_RECORD XEMU_INPUT_RECORD_PORT
-  XEMU_TRACE_RECORD XEMU_TRACE_REGIONS XEMU_BLOCK_LOG XEMU_VOICE_LOG XEMU_AUDIO_WAV
-  XEMU_ICOUNT_LIVE_PADS XEMU_VK_DRIVER XEMU_QMP_WATCH XEMU_LANGUAGE
-  XEMU_RENDER_NULL_RAM XEMU_LOADVM_SHRINK_RAM XEMU_AGP_FULL_DECODE XEMU_CSTATUS_FULL_RAM
-  XEMU_SOCKET_BACKLOG XEMU_STRICT_CPUID XEMU_GUEST_BUGCHECK)
+XEMU_AUTOMATION_ENV=(${(f)"$(python3 -I -B $XEMU_LEASE_PY --automation-env)"})
+(( ${#XEMU_AUTOMATION_ENV} )) || { echo "lease: no AUTOMATION_ENV from $XEMU_LEASE_PY --automation-env" >&2; return 1; }
 () {
   local v
   for v in $XEMU_AUTOMATION_ENV; do
@@ -135,6 +156,9 @@ for i, fd in enumerate(sys.argv[1:]):
     fi
     if (( said < 0 || EPOCHSECONDS - t0 - said >= 60 )); then
       echo "lease: all $n fork-xemu slots busy (XEMU_FORK_SLOTS); waiting" >&2
+      # the holders past their expected end, with CPU against runnable seconds
+      XEMU_LEASE_DIR=$XEMU_LEASE_DIR python3 -I -B $XEMU_LEASE_PY 2>/dev/null |
+        grep 'past its expected end' | sed 's/^ */lease:   holder pid /' >&2 || true
       said=$(( EPOCHSECONDS - t0 ))
     fi
     sleep 2
@@ -152,6 +176,7 @@ xemu_lease_write() {   # <pid> <purpose> <expected seconds>
     "\"expected_end_epoch\": $(( now + secs )), \"slot\": ${XEMU_SLOT:-null}," \
     "\"launcher_pid\": $$, \"marker\": \"xemu-fork-auto\"}" > $f.$$.tmp && mv -f $f.$$.tmp $f
   XEMU_LEASE_PID=$pid
+  (( $+commands[taskpolicy] )) && taskpolicy -B -p $pid 2>/dev/null || true
   # That xemu inherited the slot's descriptor: drop ours, so the slot lasts
   # exactly as long as the xemu (and later children don't hold it).
   if [[ -n $XEMU_SLOT_FD ]]; then local fd=$XEMU_SLOT_FD; exec {fd}<&-; XEMU_SLOT_FD=""; fi
@@ -166,7 +191,26 @@ xemu_auto_end() {
   return 0
 }
 
+xemu_wait_ready() {   # <log> <pid> [binary] [settle s]
+  local log=$1 pid=$2 bin=$3 settle=${4:-5} t0=$EPOCHREALTIME
+  if [[ -n $bin ]] && ! grep -qaF 'xemu: ready' $bin; then
+    sleep $(( 20 + settle ))   # no readiness line in this build: the old fixed wait
+  else
+    until grep -qF 'xemu: ready' $log 2>/dev/null; do
+      kill -0 $pid 2>/dev/null || return 1
+      (( EPOCHREALTIME - t0 < ${XEMU_READY_TIMEOUT:-120} )) || return 1
+      sleep 0.1
+    done
+    sleep $settle
+  fi
+  kill -0 $pid 2>/dev/null
+}
+
 xemu_bench_cache() {   # <xemu binary> <isolate 0|1>
+  if [[ ${1:A} == $XEMU_REPO_ROOT/dist(|/*) ]]; then
+    echo "lease: refusing $1: dist/ is the owner's bundle; launch a clone (scripts/refresh-clone.sh)" >&2
+    exit 2
+  fi
   if (( $2 )) || ! grep -qa XEMU_BASE_PATH $1; then
     XEMU_BENCH_PORTABLE=1 XEMU_BENCH_BASE=${1:h:h}/Resources/
   else

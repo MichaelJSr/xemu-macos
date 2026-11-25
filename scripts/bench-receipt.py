@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""bench-receipt.py — gate + receipt engine for scripts/bench-abx.sh (and
-bench-savestate-ab.sh, its one-knob wrapper) and the Windows bench.
+"""bench-receipt.py — gate + receipt engine for scripts/bench-abx.sh and
+the Windows bench (scripts/bench-savestate-ab-win.py).
 
 Encodes the validity disciplines the interleaved savestate A/B method
 demands (see the xemu-operate and xemu-history skills) so they are ENFORCED by
@@ -11,25 +11,39 @@ the harness instead of left to operator discipline:
             draws/flip lies inside the required band (menu/out-of-band
             scene: menu-vs-gameplay), and flag within-run bimodality via
             the draws/flip coefficient of variation (bimodal attract
-            reel: regime straddling). Writes a per-run JSON.
+            reel: regime straddling). Also records, over the kept
+            intervals, the headroom numbers a capped scene is judged
+            by: flip_idle ms/flip (the wait for vblank), the worst
+            frame (nsprof flip_gap max), process CPU (the per-tick
+            samples in --cpu, default the log's ab_<label>.cpu) and,
+            when the run had XEMU_APU_PROF=1, the APU thread's
+            `apu: utilization`. Writes a per-run JSON.
 
   receipt   aggregate per-run JSONs into the full protocol receipt:
-            per-arm mean +/- sd, per-pair deltas and sign tally,
-            cross-arm draws/flip identity check (>15% = INVALID,
+            per-arm mean +/- sd and headroom, per-pair deltas and sign
+            tally, cross-arm draws/flip identity check (>15% = INVALID,
             >5% = composition warning + draws/s throughput, the 1.18
             correction), the Vulkan driver of every run (an arm whose
             runs name more than one `- Driver:` is INVALID: with
             driver = 'kosmickrisp' a KosmicKrisp strike marker in the
             shared data folder switches later runs to MoltenVK), binary
-            identity, and a
-            machine-readable JSON receipt. Exit code carries the verdict.
+            identity, and a machine-readable JSON receipt. CAPPED when
+            every run sits within 0.5 fps of the frame cap (--cap-fps,
+            else the meta's config.cap_fps, else 60), or every run
+            within 0.5 fps of half of it (a 30 fps lock), with a small
+            sd: fps can't separate the arms, more pairs won't either,
+            so judge flip_idle, process CPU and the worst frames
+            instead. An arm whose APU thread peaks at 90% or more gets
+            a WARNING (it is close to falling behind real time) but no
+            verdict change. Exit code carries the verdict (0: valid or
+            capped).
 
   selftest  --dry-run backend: builds synthetic nsprof fixtures (a
-            clean 3-pair A/B, a bimodal run, an out-of-band menu run),
-            proves the gate PASSES the clean runs and FAILS the bad
-            ones (a net must fire before it is trusted), then builds
-            a receipt from the clean runs and checks its verdict and
-            sign tally. Touches nothing outside --outdir.
+            clean 3-pair A/B, a bimodal run, an out-of-band menu run,
+            a capped A/B), proves the gate PASSES the clean runs and
+            FAILS the bad ones (a net must fire before it is trusted),
+            then builds receipts from them and checks verdict, sign
+            tally and headroom. Touches nothing outside --outdir.
 
 stdlib only. Python >= 3.8.
 """
@@ -47,6 +61,23 @@ import time
 GATE_EXIT_INVALID = 3
 RECEIPT_EXIT_INVALID = 4
 SELFTEST_EXIT_FAIL = 5
+
+DEFAULT_SUMMARIZER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "nsprof_summarize.py")
+CAP_FPS = 60.0         # the guest's vblank cap (config.cap_fps, --cap-fps)
+CAP_FPS_TOL = 0.5      # a run within this of the cap sits at it ...
+CAP_RUN_SD_MAX = 1.0   # ... when its intervals' fps sd is this small
+APU_UTIL_WARN = 90.0   # an APU thread peaking here nears real-time loss
+
+# The interval header and the flip_gap counter as hw/xbox/nv2a/nsprof.c
+# prints them (flip_gap max: the interval's longest frame), and
+# hw/xbox/mcpx/apu/apu.c's XEMU_APU_PROF=1 line.
+NSPROF_HEADER_RE = re.compile(
+    r"^nsprof: ([0-9.]+)s interval, (\d+) flips \(([0-9.]+)/s\)")
+FLIP_GAP_RE = re.compile(
+    r"^nsprof:\s+flip_gap\s+ev=\d+\s+total=\s*[0-9.]+ms"
+    r"\s+per_flip=\s*[0-9.]+us\s+max=\s*([0-9.]+)us")
+APU_RE = re.compile(r"^apu: utilization\s+([0-9.]+)%")
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +110,49 @@ def log_vk_driver(log_path):
     return m.group(1) if m else ""
 
 
+def log_extras(log_path):
+    """(flip_gap max in ms per nsprof interval, None where the interval
+    printed none; [(interval index, APU utilization %)]). An `apu:` line
+    printed before interval k's summary ran during interval k."""
+    gaps, apu = [], []
+    try:
+        f = open(log_path, errors="replace")
+    except OSError:
+        return gaps, apu
+    with f:
+        for line in f:
+            if NSPROF_HEADER_RE.match(line):
+                gaps.append(None)
+                continue
+            m = FLIP_GAP_RE.match(line)
+            if m and gaps:
+                gaps[-1] = float(m.group(1)) / 1000.0
+                continue
+            m = APU_RE.match(line)
+            if m:
+                apu.append((len(gaps), float(m.group(1))))
+    return gaps, apu
+
+
+def read_cpu(path):
+    """Mean of a run's per-tick process CPU % samples (one number a line;
+    bench-abx and the Windows bench write them), the first dropped as
+    the post-load transient when there are more; (None, 0) without."""
+    vals = []
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                try:
+                    vals.append(float(line.strip()))
+                except ValueError:
+                    pass
+    except (OSError, TypeError):
+        return None, 0
+    if len(vals) > 1:
+        vals = vals[1:]
+    return (sum(vals) / len(vals), len(vals)) if vals else (None, 0)
+
+
 def mean_sd(vals):
     if not vals:
         return 0.0, 0.0
@@ -87,6 +161,11 @@ def mean_sd(vals):
         return m, 0.0
     var = sum((v - m) ** 2 for v in vals) / (len(vals) - 1)
     return m, math.sqrt(var)
+
+
+def mean_or_none(vals):
+    vals = [v for v in vals if v is not None]
+    return sum(vals) / len(vals) if vals else None
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +210,18 @@ def cmd_gate(args):
     valid = band_ok and not bimodal
 
     fps_mean, fps_sd = mean_sd(fpss)
+    # Headroom over the same kept intervals (index start + transient on).
+    kept_from = boot_excluded + transient_dropped
+    gaps, apu = log_extras(args.log)
+    if len(gaps) == len(all_iv) and intervals:
+        kept_gaps = [g for g in gaps[kept_from:] if g is not None]
+    else:   # the two parses disagree: report no frame gaps
+        kept_gaps = []
+    apu_kept = [u for k, u in apu if intervals and k >= kept_from]
+    cpu_path = args.cpu
+    if cpu_path is None and args.log.endswith(".log"):
+        cpu_path = args.log[:-4] + ".cpu"
+    cpu_mean, cpu_n = read_cpu(cpu_path)
     run = {
         "label": args.label,
         "log": args.log,
@@ -147,6 +238,13 @@ def cmd_gate(args):
         "draws_pf_cv": cv,
         "draws_per_s_mean": mean_sd(
             [iv["draws_pf"] * iv["fps"] for iv in intervals])[0],
+        "flip_idle_ms_pf": mean_or_none(
+            [iv.get("flip_idle_ms_pf") for iv in intervals]),
+        "flip_gap_max_ms": max(kept_gaps) if kept_gaps else None,
+        "cpu_pct_mean": cpu_mean,
+        "cpu_samples": cpu_n,
+        "apu_util_pct_mean": mean_or_none(apu_kept),
+        "apu_util_pct_max": max(apu_kept) if apu_kept else None,
         "band": [band_lo, band_hi],
         "band_ok": band_ok,
         "out_of_band_intervals": out_of_band,
@@ -168,8 +266,16 @@ def cmd_gate(args):
         detail.append(f"bimodal: draws/flip CV {cv:.3f} > {args.cv_max:g} "
                       f"(bimodal attract reel)")
     anchored = (f" pre-scene={boot_excluded}" if boot_excluded else "")
+    extra = ""
+    if run["flip_idle_ms_pf"] is not None and intervals:
+        extra += f" idle={run['flip_idle_ms_pf']:.2f}ms/f"
+    if cpu_mean is not None:
+        extra += f" cpu={cpu_mean:.0f}%"
+    if run["apu_util_pct_mean"] is not None:
+        extra += f" apu={run['apu_util_pct_mean']:.1f}%"
     print(f"gate[{args.label}]: {tag}  fps={fps_mean:.2f}±{fps_sd:.2f} "
           f"draws/flip={d_mean:.1f}±{d_sd:.1f} n={len(intervals)}{anchored}"
+          f"{extra}"
           + ("  -- " + "; ".join(detail) if detail else ""))
     return 0 if valid else GATE_EXIT_INVALID
 
@@ -218,16 +324,31 @@ def cmd_receipt(args):
             return None
         fm, fs = mean_sd([r["fps_mean"] for r in arm])
         dm, ds = mean_sd([r["draws_pf_mean"] for r in arm])
+        gaps = [r.get("flip_gap_max_ms") for r in arm
+                if r.get("flip_gap_max_ms") is not None]
+        apu_max = [r.get("apu_util_pct_max") for r in arm
+                   if r.get("apu_util_pct_max") is not None]
         return {
             "n_runs": len(arm),
             "fps_mean": fm, "fps_sd": fs,
             "draws_pf_mean": dm, "draws_pf_sd": ds,
             "draws_per_s_mean": mean_sd(
                 [r["draws_per_s_mean"] for r in arm])[0],
+            # headroom (None where no run recorded it)
+            "flip_idle_ms_pf": mean_or_none(
+                [r.get("flip_idle_ms_pf") for r in arm]),
+            "cpu_pct_mean": mean_or_none([r.get("cpu_pct_mean") for r in arm]),
+            "flip_gap_max_ms_mean": mean_or_none(gaps),
+            "flip_gap_max_ms": max(gaps) if gaps else None,
+            "apu_util_pct_mean": mean_or_none(
+                [r.get("apu_util_pct_mean") for r in arm]),
+            "apu_util_pct_max": max(apu_max) if apu_max else None,
             "all_gates_ok": all(r["valid"] for r in arm),
         }
 
     sb, se = arm_stats(arm_b), arm_stats(arm_e)
+    cap_fps = float(args.cap_fps if getattr(args, "cap_fps", None)
+                    else meta.get("config", {}).get("cap_fps") or CAP_FPS)
 
     # per-pair deltas + sign tally (B_k vs E_k). Pair indices come from
     # the labels actually present so a fully-dead pair can't hide the
@@ -242,8 +363,12 @@ def cmd_receipt(args):
             d = e["fps_mean"] - b["fps_mean"]
             sign = "+" if d > 0 else ("-" if d < 0 else "0")
             tally["pos" if d > 0 else ("neg" if d < 0 else "zero")] += 1
-            pairs.append({"pair": k, "B_fps": b["fps_mean"],
-                          "E_fps": e["fps_mean"], "delta": d, "sign": sign})
+            pair = {"pair": k, "B_fps": b["fps_mean"],
+                    "E_fps": e["fps_mean"], "delta": d, "sign": sign}
+            for key in ("cpu_pct_mean", "flip_idle_ms_pf"):
+                if b.get(key) is not None and e.get(key) is not None:
+                    pair["B_" + key], pair["E_" + key] = b[key], e[key]
+            pairs.append(pair)
     unanimous = (len(pairs) > 0 and
                  (tally["pos"] == len(pairs) or tally["neg"] == len(pairs)))
 
@@ -276,12 +401,40 @@ def cmd_receipt(args):
     driver_mixed = [arm for arm, d in drivers.items() if len(d) > 1]
 
     gates_ok = bool(live) and all(r["valid"] for r in live)
+    # At the cap fps can't separate the arms and more pairs won't help;
+    # nor at half of it, the 30 fps lock of a game that can't make every
+    # vblank. Every run must sit at the same one.
+    capped_at = None
+    for level in (cap_fps, cap_fps / 2):
+        if sb and se and all(
+                abs(r["fps_mean"] - level) <= CAP_FPS_TOL and
+                r.get("fps_sd", 0.0) <= CAP_RUN_SD_MAX for r in arm_b + arm_e):
+            capped_at = level
+            break
+    capped = capped_at is not None
+    # An APU thread near 100% falls behind real time (audio stutters)
+    # whatever the fps says: warn, no verdict change.
+    apu_warn = [arm for arm, s in (("B", sb), ("E", se))
+                if s and s.get("apu_util_pct_max") is not None and
+                s["apu_util_pct_max"] >= APU_UTIL_WARN]
     if dead or not live:
         verdict = "dead-runs"
     elif not gates_ok or scene["verdict"] == "invalid" or driver_mixed:
         verdict = "invalid"
+    elif capped:
+        verdict = "capped"
     else:
         verdict = "valid"
+
+    headroom = None
+    if sb and se:
+        headroom = {"cap_fps": cap_fps, "capped_at": capped_at}
+        for key in ("flip_idle_ms_pf", "cpu_pct_mean",
+                    "flip_gap_max_ms_mean", "apu_util_pct_mean",
+                    "draws_per_s_mean"):
+            if sb.get(key) is not None and se.get(key) is not None:
+                headroom[key] = {"B": sb[key], "E": se[key],
+                                 "delta": se[key] - sb[key]}
 
     fps_delta = None
     if sb and se and verdict == "valid":
@@ -297,7 +450,7 @@ def cmd_receipt(args):
                       "delta_pct": ((te - tb) / tb * 100.0) if tb else None}
 
     receipt = {
-        "protocol": "bench-savestate-ab/2",
+        "protocol": "bench-receipt/3",
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "config": meta.get("config", {}),
         "binary": meta.get("binary", {}),
@@ -310,7 +463,9 @@ def cmd_receipt(args):
         "scene_identity": scene,
         "drivers": drivers,
         "driver_mixed_arms": driver_mixed,
+        "apu_warn_arms": apu_warn,
         "throughput": throughput,
+        "headroom": headroom,
         "fps_delta": fps_delta,
         "dead_runs": [r["label"] for r in dead],
         "verdict": verdict,
@@ -319,7 +474,7 @@ def cmd_receipt(args):
         json.dump(receipt, f, indent=2)
 
     print_receipt_block(receipt)
-    return 0 if verdict == "valid" else RECEIPT_EXIT_INVALID
+    return 0 if verdict in ("valid", "capped") else RECEIPT_EXIT_INVALID
 
 
 def print_receipt_block(r):
@@ -331,14 +486,15 @@ def print_receipt_block(r):
     print(f"experiment    : {experiment}, "
           f"snapshot '{c.get('snapshot', '?')}', {c.get('pairs', '?')} pairs x "
           f"{c.get('secs', '?')} s, interleaved {c.get('interleave', [])}")
-    # bench-abx.sh (bench-savestate-ab.sh too): binary.arms, each arm's own
-    # identity (one bundle for both arms repeats it); the Windows bench
-    # writes one flat binary block instead.
+    # bench-abx.sh: binary.arms, each arm's own identity (one bundle for
+    # both arms repeats it); the Windows bench writes one flat binary
+    # block instead.
     for arm, a in sorted(b.get('arms', {}).items()):
         print(f"binary {arm}      : {a.get('git_describe', '?')}  "
               f"sha256 {str(a.get('binary_sha256', '?'))[:16]}...  "
               f"MoltenVK {a.get('moltenvk_version', '?')}  "
-              f"env '{a.get('env', '')}'")
+              f"env '{a.get('env', '')}'"
+              + (f"  set '{a['set']}'" if a.get('set') else ""))
         if a.get('vk_driver'):
             print(f"driver {arm}      : {a['vk_driver']}")
     if not b.get('arms'):
@@ -360,14 +516,40 @@ def print_receipt_block(r):
                   f"draws/flip {s['draws_pf_mean']:.1f} ±{s['draws_pf_sd']:.1f}  "
                   f"({s['n_runs']} runs, gates "
                   f"{'ok' if s['all_gates_ok'] else 'FAILED'})")
+    for arm in ("B", "E"):
+        s = r["arms"][arm]
+        if not s:
+            continue
+        h = [f"draws/s {s['draws_per_s_mean']:.0f}"]
+        if s.get("flip_idle_ms_pf") is not None:
+            h.append(f"flip_idle {s['flip_idle_ms_pf']:.2f} ms/flip")
+        if s.get("cpu_pct_mean") is not None:
+            h.append(f"CPU {s['cpu_pct_mean']:.0f}%")
+        if s.get("flip_gap_max_ms") is not None:
+            h.append(f"worst frame {s['flip_gap_max_ms_mean']:.1f} ms "
+                     f"(max {s['flip_gap_max_ms']:.1f})")
+        print(f"headroom {arm}    : " + ", ".join(h))
+        if s.get("apu_util_pct_mean") is not None:
+            print(f"apu {arm}         : utilization {s['apu_util_pct_mean']:.1f}% "
+                  f"mean, {s['apu_util_pct_max']:.1f}% max (XEMU_APU_PROF)")
+        if arm in r.get("apu_warn_arms", []):
+            print(f"WARNING       : arm {arm}'s APU thread peaked at "
+                  f"{s['apu_util_pct_max']:.1f}% (>= {APU_UTIL_WARN:g}%): "
+                  "near falling behind real time, audio may stutter "
+                  "whatever the fps")
     for p in r["pairs"]:
+        cpu = ""
+        if p.get("B_cpu_pct_mean") is not None:
+            cpu = (f"  CPU {p['B_cpu_pct_mean']:.0f}% -> {p['E_cpu_pct_mean']:.0f}% "
+                   f"({p['E_cpu_pct_mean'] - p['B_cpu_pct_mean']:+.0f})")
         print(f"pair {p['pair']}        : B {p['B_fps']:.2f} -> E {p['E_fps']:.2f}  "
-              f"delta {p['delta']:+.2f} ({p['sign']})")
+              f"delta {p['delta']:+.2f} ({p['sign']}){cpu}")
     t = r["sign_tally"]
+    capped = r["verdict"] == "capped"
     print(f"sign tally    : +{t['pos']} / -{t['neg']} / 0:{t['zero']} of "
           f"{t['n_pairs']} pairs"
-          + ("  (UNANIMOUS)" if t["unanimous"] else "  (not unanimous — "
-             "underpowered for a marginal claim; escalate to 6/6)"))
+          + ("  (both arms at the cap: fps can't separate them)" if capped
+             else "  (UNANIMOUS)" if t["unanimous"] else "  (not unanimous)"))
     si = r["scene_identity"]
     print(f"scene identity: {si['verdict']}"
           + (f" — {si['note']}" if si["note"] else ""))
@@ -378,6 +560,23 @@ def print_receipt_block(r):
     if r["fps_delta"]:
         print(f"fps delta     : {r['fps_delta']['abs']:+.2f} fps "
               f"({r['fps_delta']['pct']:+.2f}%)")
+    hr = r.get("headroom") or {}
+    if capped:
+        d = []
+        for key, what, fmt in (("flip_idle_ms_pf", "flip_idle", "{:+.2f} ms/flip"),
+                               ("cpu_pct_mean", "CPU", "{:+.1f} points"),
+                               ("flip_gap_max_ms_mean", "worst frame", "{:+.1f} ms"),
+                               ("apu_util_pct_mean", "APU", "{:+.1f} points")):
+            if key in hr:
+                d.append(what + " " + fmt.format(hr[key]["delta"]))
+        cap = hr.get("cap_fps", CAP_FPS)
+        at = hr.get("capped_at") or cap
+        print(f"capped        : every run within {CAP_FPS_TOL:g} fps of "
+              f"{at:g}" + (f" (half the {cap:g} cap)" if at != cap else "")
+              + "; E - B: "
+              + (", ".join(d) if d else "no headroom counters recorded")
+              + " (more flip_idle, less CPU, shorter worst frames = more "
+              "headroom; add no pairs)")
     if r["dead_runs"]:
         print(f"dead runs     : {', '.join(r['dead_runs'])}")
     for arm in r.get("driver_mixed_arms", []):
@@ -391,24 +590,43 @@ def print_receipt_block(r):
 # selftest fixtures (--dry-run)
 # ---------------------------------------------------------------------------
 
-def write_fixture(path, interval_specs):
+def write_fixture(path, interval_specs, idle_ms=None, gap_ms=None, apu=None,
+                  cpu=None):
     """Write a synthetic nsprof stderr log. interval_specs: list of
     (fps, draws_pf). Matches hw/xbox/nv2a/nsprof.c line formats that
-    nsprof_summarize.py parses."""
+    nsprof_summarize.py parses. idle_ms / gap_ms add flip_idle (per flip)
+    and flip_gap (max) counters, apu an `apu: utilization` line before
+    each interval's summary, cpu an ab_<label>.cpu sibling (one sample
+    per interval)."""
     with open(path, "w") as f:
         f.write("synthetic fixture: non-nsprof noise line\n")
         for fps, draws_pf in interval_specs:
             secs = 5.0
             flips = int(round(fps * secs))
             draws = int(round(draws_pf * flips))
+            if apu is not None:
+                f.write(f"apu: utilization {apu:5.1f}% (375 frames/s)\n")
             f.write(f"nsprof: {secs:.1f}s interval, {flips} flips "
                     f"({flips/secs:.1f}/s)\n")
             f.write(f"nsprof:   fence_wait   ev={flips*2}     "
                     f"total= 443.90ms per_flip= 2300.0us max= 8123.0us\n")
+            if idle_ms is not None:
+                f.write(f"nsprof:   flip_idle    ev={flips}     "
+                        f"total={idle_ms * flips:7.2f}ms "
+                        f"per_flip={idle_ms * 1000:7.1f}us max=20000.0us\n")
+            if gap_ms is not None:
+                f.write(f"nsprof:   flip_gap     ev={flips}     "
+                        f"total={1000 * secs:7.2f}ms "
+                        f"per_flip={1e6 / fps:7.1f}us "
+                        f"max={gap_ms * 1000:7.1f}us\n")
             f.write(f"nsprof:   draws               ev={draws}   "
                     f"per_flip=  {draws_pf:.1f}\n")
             f.write(f"nsprof:   renderpass          ev={flips*14}   "
                     f"per_flip=  14.0\n")
+    if cpu is not None:
+        with open(path[:-4] + ".cpu", "w") as f:
+            f.write("".join(f"{cpu + (40 if i == 0 else 0):.1f}\n"
+                            for i in range(len(interval_specs))))
 
 
 def gate_fixture(outdir, summarizer, label, log, band, cv_max,
@@ -416,7 +634,7 @@ def gate_fixture(outdir, summarizer, label, log, band, cv_max,
     ns = argparse.Namespace(
              label=label, log=log, out=os.path.join(outdir, f"run_{label}.json"),
              summarizer=summarizer, band=band, cv_max=cv_max,
-             warmup=warmup, var_value=var_value)
+             warmup=warmup, var_value=var_value, cpu=None)
     return cmd_gate(ns), ns.out
 
 
@@ -555,6 +773,93 @@ def cmd_selftest(args):
            receipt3["driver_mixed_arms"] == ["B"],
            "receipt REFUSES an arm whose runs ran two drivers")
 
+    # 7. both arms at the 60 fps cap: CAPPED (exit 0, no fps delta), and
+    #    the headroom it is judged by instead: E idles 2 ms a flip longer
+    #    on 10 points less CPU, its worst frame 5 ms shorter, APU 20% vs 25%
+    capped_jsons = []
+    for k in (1, 2):
+        for arm, idle, cpu, gap, apu in (("B", 6.0, 230.0, 30.0, 25.0),
+                                         ("E", 8.0, 220.0, 25.0, 20.0)):
+            label = f"{arm}{k}"
+            log = os.path.join(outdir, f"ab_cap{label}.log")
+            write_fixture(log, [(60.0, 576.0 + k)] * 5, idle_ms=idle,
+                          gap_ms=gap, apu=apu, cpu=cpu)
+            rc, rj = gate_fixture(outdir, args.summarizer, label, log, band,
+                                  cv_max, var_value=arm)
+            renamed = os.path.join(outdir, f"run_cap{label}.json")
+            os.replace(rj, renamed)
+            expect(rc == 0, f"gate passes capped fixture {label}")
+            capped_jsons.append(renamed)
+    meta4 = dict(meta)
+    meta4["run_jsons"] = capped_jsons
+    meta4_path = os.path.join(outdir, "meta-capped.json")
+    with open(meta4_path, "w") as f:
+        json.dump(meta4, f, indent=2)
+    ns4 = argparse.Namespace(meta=meta4_path,
+                             out=os.path.join(outdir, "receipt-capped.json"))
+    rc4 = cmd_receipt(ns4)
+    with open(ns4.out) as f:
+        receipt4 = json.load(f)
+    hr = receipt4.get("headroom") or {}
+    expect(rc4 == 0 and receipt4["verdict"] == "capped" and
+           receipt4["fps_delta"] is None,
+           "receipt says CAPPED (exit 0, no fps delta) with both arms at 60")
+    expect(abs(hr.get("flip_idle_ms_pf", {}).get("delta", 0) - 2.0) < 0.01 and
+           abs(hr.get("cpu_pct_mean", {}).get("delta", 0) + 10.0) < 0.01 and
+           abs(hr.get("flip_gap_max_ms_mean", {}).get("delta", 0) + 5.0) < 0.01 and
+           abs(hr.get("apu_util_pct_mean", {}).get("delta", 0) + 5.0) < 0.01,
+           "capped headroom: flip_idle +2 ms, CPU -10 (transient sample "
+           "dropped), worst frame -5 ms, APU -5")
+    expect(receipt["verdict"] == "valid" and
+           receipt["headroom"].get("cpu_pct_mean") is None,
+           "38 fps fixtures are not capped; no CPU without .cpu samples")
+    expect(receipt4["apu_warn_arms"] == [],
+           "no APU warning with the APU thread at 20-25%")
+
+    # 8. the cap's other shapes: a 30 fps lock (half the default 60 cap)
+    #    is CAPPED, B at 30 vs E at 60 is a real fps win, a meta cap_fps
+    #    of 50 (PAL) caps at 50; an E APU thread peaking at 95% warns
+    #    without changing the verdict.
+    def cap_receipt(name, fps_of, cap_fps=None):
+        jsons = []
+        for k in (1, 2):
+            for arm in ("B", "E"):
+                label = f"{arm}{k}"
+                log = os.path.join(outdir, f"ab_{name}{label}.log")
+                write_fixture(log, [(fps_of[arm], 576.0 + k)] * 5,
+                              idle_ms=6.0, apu=95.0 if arm == "E" else 40.0)
+                _, rj = gate_fixture(outdir, args.summarizer, label, log,
+                                     band, cv_max, var_value=arm)
+                renamed = os.path.join(outdir, f"run_{name}{label}.json")
+                os.replace(rj, renamed)
+                jsons.append(renamed)
+        m = dict(meta, run_jsons=jsons,
+                 config=dict(meta["config"], **({"cap_fps": cap_fps}
+                                                if cap_fps else {})))
+        mpath = os.path.join(outdir, f"meta-{name}.json")
+        with open(mpath, "w") as f:
+            json.dump(m, f, indent=2)
+        nsx = argparse.Namespace(meta=mpath,
+                                 out=os.path.join(outdir, f"receipt-{name}.json"))
+        rcx = cmd_receipt(nsx)
+        with open(nsx.out) as f:
+            return rcx, json.load(f)
+
+    rc5, half = cap_receipt("half", {"B": 30.0, "E": 30.0})
+    expect(rc5 == 0 and half["verdict"] == "capped" and
+           half["headroom"]["capped_at"] == 30.0,
+           "receipt says CAPPED at 30 for a 30 fps lock (half the 60 cap)")
+    expect(half["apu_warn_arms"] == ["E"],
+           "APU WARNING on the arm whose thread peaks at 95%, verdict kept")
+    rc6, win = cap_receipt("halfwin", {"B": 30.0, "E": 60.0})
+    expect(rc6 == 0 and win["verdict"] == "valid" and
+           win["fps_delta"] is not None,
+           "B at 30 vs E at 60 is not capped: the fps delta stands")
+    rc7, pal = cap_receipt("pal", {"B": 50.0, "E": 50.0}, cap_fps=50)
+    expect(rc7 == 0 and pal["verdict"] == "capped" and
+           pal["headroom"]["capped_at"] == 50.0,
+           "meta config.cap_fps 50 (bench-abx --cap-fps): CAPPED at 50")
+
     print()
     if failures:
         print(f"selftest: {len(failures)} FAILURE(S)")
@@ -581,12 +886,15 @@ def main():
     g.add_argument("--label", required=True)
     g.add_argument("--log", required=True)
     g.add_argument("--out", required=True)
-    g.add_argument("--summarizer", required=True)
+    g.add_argument("--summarizer", default=DEFAULT_SUMMARIZER)
     g.add_argument("--band", type=parse_band, default=(100.0, 1e9),
                    metavar="LO[:HI]")
     g.add_argument("--cv-max", type=float, default=0.10)
     g.add_argument("--warmup", action="store_true")
     g.add_argument("--var-value", default="")
+    g.add_argument("--cpu", default=None, metavar="FILE",
+                   help="per-tick process CPU %% samples, one a line "
+                        "(default: the log's .cpu sibling, if any)")
 
     d = sub.add_parser("dead", help="record a run that failed to launch")
     d.add_argument("--label", required=True)
@@ -599,10 +907,13 @@ def main():
     r = sub.add_parser("receipt", help="aggregate runs into the receipt")
     r.add_argument("--meta", required=True)
     r.add_argument("--out", required=True)
+    r.add_argument("--cap-fps", type=float, default=None,
+                   help="frame cap for the CAPPED verdict (default: the "
+                        "meta's config.cap_fps, else %g)" % CAP_FPS)
 
     s = sub.add_parser("selftest", help="--dry-run plumbing check")
     s.add_argument("--outdir", required=True)
-    s.add_argument("--summarizer", required=True)
+    s.add_argument("--summarizer", default=DEFAULT_SUMMARIZER)
 
     args = ap.parse_args()
     if args.cmd == "gate":

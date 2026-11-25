@@ -1,8 +1,9 @@
 #!/bin/zsh
-# Counter-probe run: boot, loadvm each tag, dwell in-scene after each load,
-# clean monitor quit so every atexit dump (INV_PROF a-e, subpage-fast, ras)
-# lands in run.log. Extra VAR=V args exported to xemu. Caches in the bench
-# cache; nice, marker, slot and lease per scripts/xemu-lease.zsh.
+# Counter-probe run: boot, loadvm each tag (the first 5 s after `xemu:
+# ready`), dwell in-scene after each load, clean monitor quit so every
+# atexit dump (INV_PROF a-e, subpage-fast, ras) lands in run.log. Extra
+# VAR=V args exported to xemu. Caches in the bench cache; nice, marker,
+# slot and lease per scripts/xemu-lease.zsh.
 #   [PROBE_CYCLES=N] probe-run.sh <app> <outdir> <tag[,tag2,...]> [dwell=80] [VAR=V ...]
 # PROBE_CYCLES (default 1) repeats the loads: each cycle loads every tag in
 # order. Before each load xemu must still run, and a load whose reply says
@@ -58,8 +59,8 @@ $XEMU_NICE env XEMU_BASE_PATH=$XEMU_BENCH_BASE "${EXTRA_ENV[@]}" XEMU_NV2A_NSPRO
     -monitor unix:$SOCK,server,nowait > $OUT/run.log 2>&1 &
 PID=$!
 xemu_lease_write $PID "probe-run ${(j:,:)TAGS} x$CYC ${DWELL}s" $(( 60 + CYC * ${#TAGS} * (DWELL + 4) ))
-for i in $(seq 1 30); do kill -0 $PID 2>/dev/null || { echo "probe-run: died at launch"; exit 1; }; [[ -S $SOCK ]] && break; sleep 1; done
-sleep 25
+xemu_wait_ready $OUT/run.log $PID $APP/Contents/MacOS/xemu && [[ -S $SOCK ]] ||
+  { echo "probe-run: died at launch (no 'xemu: ready' or no monitor socket; see $OUT/run.log)"; exit 1; }
 
 mon() {
 python3 - "$SOCK" "$1" <<'EOF'

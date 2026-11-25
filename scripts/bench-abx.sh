@@ -4,19 +4,31 @@
 #
 #   scripts/bench-abx.sh <snapshot> [pairs] [secs] [outdir]
 #                        --b-app PATH --e-app PATH [flags]
+#   scripts/bench-abx.sh <snapshot> [pairs] [secs] [outdir]
+#                        --app PATH --b-env VAR=0 --e-env VAR=1 --one-warmup
 #
 # Scene-identity gate, dead-run records and protocol receipt
 # (scripts/bench-receipt.py). Each arm has its own bundle (--b-app /
-# --e-app) and its own env SET (--b-env "A=1 B=2" / --e-env ...), so it
+# --e-app), its own env SET (--b-env "A=1 B=2" / --e-env ...) and its own
+# config keys (--b-set "perf.x=false display.y=1" / --e-set ...), so it
 # covers
 #   - cross-binary  (release vs release, before vs after a dependency bump)
 #   - multi-variable arms (two knobs toggled together)
 #   - pinned non-zero baselines (--b-env "KNOB=300" --e-env "KNOB=50")
-#   - one knob, B VAR=0 vs E VAR=1: scripts/bench-savestate-ab.sh, a wrapper
-#     that passes one bundle for both arms and --one-warmup
-# Point both --b-app and --e-app at one bundle for the last three: when
-# they resolve to the same real path, the bundle is cloned once and both
-# arms run that clone, config and cache base.
+#   - one knob: B VAR=0 vs E VAR=1, or a config key B false vs E true
+# --app PATH is --b-app PATH --e-app PATH: one bundle, cloned once, both
+# arms running that clone and cache base (so do two flags that resolve to
+# the same real path); with config keys each arm gets its own scratch
+# config.
+#
+# Each run waits for xemu's `xemu: ready` line and --boot-wait seconds
+# more before its loadvm. The receipt says CAPPED when every run sits at
+# the frame cap (--cap-fps, default 60) or every run at half of it (a
+# 30 fps lock): judge its headroom lines (flip_idle ms/flip, process
+# CPU from the per-run ab_<label>.cpu samples, the worst frame) and add
+# no pairs. XEMU_APU_PROF=1 in an arm's --*-env adds that arm's APU
+# thread utilization (`apu: utilization`) to the receipt, with a
+# WARNING when it peaks at 90% or more.
 #
 # Isolation: the bundle(s) APFS-cloned into a work
 # dir, the qcow2 and eeprom cloned once (the arms run sequentially),
@@ -34,8 +46,13 @@
 # gets its own 40 s warmup run, unless --one-warmup.
 #
 # Flags:
-#   --b-app PATH / --e-app PATH   bundles to clone (required)
+#   --b-app PATH / --e-app PATH   bundles to clone (required; or --app)
+#   --app PATH         both arms' bundle
 #   --b-env "K=V ..." / --e-env   extra environment per arm
+#   --b-set "table.key=V ..." / --e-set
+#                      config keys per arm, written into that arm's scratch
+#                      config by scripts/harness-config.py --set (V is TOML:
+#                      false, 2, 'text')
 #   --isolate-caches   plant the scratch config as a portable marker in
 #                      each cloned bundle, so its shader and pipeline caches
 #                      start cold at batch start: per arm with two bundles
@@ -43,23 +60,30 @@
 #                      MoltenVK: a shared pipeline_cache.bin is rejected and
 #                      rewritten on every arm switch), one cache both arms
 #                      share with one bundle (the shader compiler or pipeline
-#                      creation under test)
+#                      creation under test). XEMU_BENCH_ISOLATE_CACHES=1
+#                      means the same
 #   --one-warmup       one 40 s warmup, on the E arm, instead of one per arm
-#                      (bench-savestate-ab.sh passes it). Valid only on one
-#                      shared clone with one driver: ignored, with a warning,
-#                      when the bundles differ or the arms' XEMU_VK_DRIVER
-#                      values do (each driver has its own pipeline cache)
+#                      (the one-knob shape). Valid only on one shared clone
+#                      with one driver: ignored, with a warning, when the
+#                      bundles differ or the arms' Vulkan drivers do
+#                      (XEMU_VK_DRIVER or display.vulkan.driver: each driver
+#                      has its own pipeline cache)
 #   --config-src PATH  config to clone (default: $XEMU_TEST_CONFIG, else
 #                      ../fixtures/xemu.toml beside the checkout)
 #   --hdd PATH         qcow2 to clone (default: hdd_path from config-src)
-#   --boot-wait N      seconds from launch to loadvm (default 25)
+#   --boot-wait N      seconds from the `xemu: ready` line to loadvm
+#                      (default 5; a build older than that line waits 20 + N
+#                      from launch)
 #   --draws-band LO[:HI] / --cv-max X   scene gate (defaults 100:inf, 0.10)
+#   --cap-fps N        the scene's frame cap for the CAPPED verdict
+#                      (default 60; 50 for a PAL title). Half of it counts
+#                      too, so a 30 fps lock needs no flag
 #   --no-screenshot    skip the mid-run visual check
 #   --keep-work        keep the work dir afterwards
 #   --dry-run          resolve and print both arms, launch nothing
 #
-# Exit: 0 valid receipt; 3 visual ARTIFACT flagged; otherwise the receipt
-# engine's code (invalid / dead runs).
+# Exit: 0 valid or CAPPED receipt; 3 visual ARTIFACT flagged; otherwise
+# the receipt engine's code (invalid / dead runs).
 set -e
 
 ROOT=${0:a:h:h}
@@ -69,15 +93,19 @@ SHOT_PY=$ROOT/scripts/bench-screenshot.py
 SUMMARIZER=$ROOT/scripts/nsprof_summarize.py
 
 typeset -a pos
-B_APP_SRC=""; E_APP_SRC=""; B_ENV=""; E_ENV=""
-ISOLATE=0; SCREENSHOT=1; KEEP_WORK=0; DRY_RUN=0; ONE_WARMUP=0
-CONFIG_SRC=""; HDD_SRC=""; BOOT_WAIT=25; DRAWS_BAND=100; CV_MAX=0.10
+B_APP_SRC=""; E_APP_SRC=""; B_ENV=""; E_ENV=""; B_SET=""; E_SET=""
+ISOLATE=${XEMU_BENCH_ISOLATE_CACHES:-0}; SCREENSHOT=1; KEEP_WORK=0; DRY_RUN=0; ONE_WARMUP=0
+[[ $ISOLATE == 1 ]] || ISOLATE=0
+CONFIG_SRC=""; HDD_SRC=""; BOOT_WAIT=5; DRAWS_BAND=100; CV_MAX=0.10; CAP_FPS=60
 while (( $# > 0 )); do
   case "$1" in
+    --app)            B_APP_SRC=$2; E_APP_SRC=$2; shift ;;
     --b-app)          B_APP_SRC=$2; shift ;;
     --e-app)          E_APP_SRC=$2; shift ;;
     --b-env)          B_ENV=$2; shift ;;
     --e-env)          E_ENV=$2; shift ;;
+    --b-set)          B_SET=$2; shift ;;
+    --e-set)          E_SET=$2; shift ;;
     --isolate-caches) ISOLATE=1 ;;
     --one-warmup)     ONE_WARMUP=1 ;;
     --config-src)     CONFIG_SRC=$2; shift ;;
@@ -85,6 +113,7 @@ while (( $# > 0 )); do
     --boot-wait)      BOOT_WAIT=$2; shift ;;
     --draws-band)     DRAWS_BAND=$2; shift ;;
     --cv-max)         CV_MAX=$2; shift ;;
+    --cap-fps)        CAP_FPS=$2; shift ;;
     --no-screenshot)  SCREENSHOT=0 ;;
     --keep-work)      KEEP_WORK=1 ;;
     --dry-run)        DRY_RUN=1 ;;
@@ -95,13 +124,19 @@ while (( $# > 0 )); do
   shift
 done
 
-SNAP=${pos[1]:?usage: bench-abx.sh <snapshot> [pairs] [secs] [outdir] --b-app P --e-app P}
+SNAP=${pos[1]:?usage: bench-abx.sh <snapshot> [pairs] [secs] [outdir] --b-app P --e-app P (or --app P)}
 PAIRS=${pos[2]:-3}
 SECS=${pos[3]:-75}
 OUT=${pos[4]:-./bench-out-abx}
 : ${CONFIG_SRC:=${XEMU_TEST_CONFIG:-${ROOT:h}/fixtures/xemu.toml}}
 
-[[ -d $B_APP_SRC && -d $E_APP_SRC ]] || { echo "need --b-app and --e-app bundles" >&2; exit 2; }
+[[ -d $B_APP_SRC && -d $E_APP_SRC ]] || { echo "need --b-app and --e-app bundles (or --app)" >&2; exit 2; }
+[[ $CAP_FPS == <->(|.<->) ]] && (( CAP_FPS > 0 )) ||
+  { echo "--cap-fps: '$CAP_FPS' is not a positive number" >&2; exit 2; }
+for kv in ${=B_SET} ${=E_SET}; do
+  [[ $kv =~ '^[A-Za-z_][A-Za-z0-9_.]*\.[A-Za-z0-9_]+=' ]] ||
+    { echo "--b-set/--e-set: '$kv' is not table.key=VALUE" >&2; exit 2; }
+done
 [[ -f $CONFIG_SRC ]] || { echo "no config at $CONFIG_SRC (--config-src or XEMU_TEST_CONFIG)" >&2; exit 2; }
 [[ -f $SUMMARIZER ]] || { echo "missing $SUMMARIZER (scene gate is mandatory)" >&2; exit 1; }
 # The monitor only knows qcow2 tags; `loadvm F8` errors on a socket nobody
@@ -120,7 +155,7 @@ EOF
 }
 
 # ---- identity of what each arm will actually run ---------------------------
-typeset -A IDENT_DESC IDENT_SHA IDENT_MVK ENVSET
+typeset -A IDENT_DESC IDENT_SHA IDENT_MVK ENVSET CFGSET
 for arm in B E; do
   vn=${arm}_APP_SRC; src=${(P)vn}
   bin=$src/Contents/MacOS/xemu
@@ -135,8 +170,10 @@ for arm in B E; do
   [[ -z ${IDENT_DESC[$arm]} ]] && \
     IDENT_DESC[$arm]="commit $(strings -a $bin | grep -E '^[0-9a-f]{40}$' | head -1 | cut -c1-12)"
   vn=${arm}_ENV; ENVSET[$arm]=${(P)vn}
+  vn=${arm}_SET; CFGSET[$arm]=${(P)vn}
   echo "abx: arm $arm = ${IDENT_DESC[$arm]:-unknown} sha256 ${IDENT_SHA[$arm][1,16]}..." \
-       "MoltenVK ${IDENT_MVK[$arm]:-unknown} env '${ENVSET[$arm]}' ($src)"
+       "MoltenVK ${IDENT_MVK[$arm]:-unknown} env '${ENVSET[$arm]}'" \
+       "${CFGSET[$arm]:+set '${CFGSET[$arm]}' }($src)"
   # A binary without XEMU_BASE_PATH would write the owner's pref dir, so it
   # gets a cold cache in its clone; isolate both arms then, or the A/B
   # would compare a cold cache against the warm shared one too.
@@ -150,27 +187,34 @@ SHARED=0
 [[ ${B_APP_SRC:A} == ${E_APP_SRC:A} ]] && SHARED=1
 CACHE_ISO=off
 (( ISOLATE )) && { (( SHARED )) && CACHE_ISO=shared || CACHE_ISO=per-arm; }
-vk_driver_of() {   # the XEMU_VK_DRIVER value in an env set ("" when unset)
+vk_driver_of() {   # <env set> <config set>: the arm's driver pick ("" when unset)
   local kv
-  for kv in ${=1}; do [[ $kv == XEMU_VK_DRIVER=* ]] && print -r -- ${kv#*=}; done
+  for kv in ${=1}; do [[ $kv == XEMU_VK_DRIVER=* ]] && { print -r -- ${kv#*=}; return 0; }; done
+  for kv in ${=2}; do [[ $kv == display.vulkan.driver=* ]] && print -r -- ${${kv#*=}//[\'\"]/}; done
   return 0
 }
 if (( ONE_WARMUP )); then
   if (( ! SHARED )); then
     echo "abx: WARNING --one-warmup ignored: the arms run different bundles; warming each arm" >&2
     ONE_WARMUP=0
-  elif [[ $(vk_driver_of "$B_ENV") != $(vk_driver_of "$E_ENV") ]]; then
-    echo "abx: WARNING --one-warmup ignored: the arms' XEMU_VK_DRIVER differ; warming each arm" >&2
+  elif [[ $(vk_driver_of "$B_ENV" "$B_SET") != $(vk_driver_of "$E_ENV" "$E_SET") ]]; then
+    echo "abx: WARNING --one-warmup ignored: the arms' Vulkan drivers differ; warming each arm" >&2
     ONE_WARMUP=0
   fi
 fi
 echo "abx: snapshot $SNAP, $PAIRS pairs x $SECS s, $( (( SHARED )) && echo 'one bundle' || echo 'two bundles')," \
-     "cache isolation $CACHE_ISO, $( (( ONE_WARMUP )) && echo 'one warmup (E)' || echo 'a warmup per arm')"
+     "cache isolation $CACHE_ISO, $( (( ONE_WARMUP )) && echo 'one warmup (E)' || echo 'a warmup per arm')," \
+     "cap $CAP_FPS fps"
 
 # ---- quiet-machine report (warn, never block) ------------------------------
 # A loaded box is legitimate for a best-effort run, but the receipt needs
-# to say so; a leftover harness loop is not, it relaunches xemu mid-batch.
-loops=$(pgrep -fl 'soak-cycles|probe-run|movement-probe|bench-savestate|bench-abx|boot-smoke' | grep -v "^$$ " || true)
+# to say so; a competing harness is not: it relaunches xemu mid-batch
+# (probe-run, a cast-probe walk) or holds fork slots (a bench-det batch).
+# Not this script, its subshells or a wrapper shell that started it (the
+# [x] keeps awk's own command line from matching).
+loops=$(ps -axo pid=,ppid=,command= | awk -v me=$$ -v up=$PPID \
+          '$1 != me && $2 != me && $1 != up &&
+           /probe-run\.s[h]|bench-abx\.s[h]|cast-probe\.p[y]|bench-det\.p[y]/' || true)
 builds=$(pgrep -fl 'ninja|clang' | grep -v clangd || true)
 echo "abx: load $(sysctl -n vm.loadavg)"
 [[ -n $loops ]] && { echo "abx: WARNING leftover harness loops running:" >&2; echo "$loops" | sed 's/^/  /' >&2; }
@@ -225,6 +269,19 @@ for arm in B E; do
   fi
   echo "abx: arm $arm caches in ${BASE[$arm]}"
 done
+# Config keys: each arm its own scratch config (-config_path never moves
+# the data folder, so a portable marker in the clone stays a marker).
+if [[ -n $B_SET$E_SET ]]; then
+  for arm in B E; do
+    CONF[$arm]=$WORK/xemu-$arm.toml
+    cp $BASECONF ${CONF[$arm]}
+    typeset -a setargs=()
+    for kv in ${=CFGSET[$arm]}; do setargs+=(--set $kv); done
+    (( ${#setargs} )) && python3 -I ${0:a:h}/harness-config.py ${CONF[$arm]} --workdir $WORK \
+        --no-pad-stubs $setargs > /dev/null
+    echo "abx: arm $arm config ${CONF[$arm]}${CFGSET[$arm]:+ (set ${CFGSET[$arm]})}"
+  done
+fi
 
 # ---- launch-path parity: canonical MVK_CONFIG_* (mirrors main()) ------------
 export MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0
@@ -234,6 +291,9 @@ export MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0
 export MVK_CONFIG_RESUME_LOST_DEVICE=1
 
 typeset -a RUN_JSONS INTERLEAVE
+cpu_secs() {   # <pid>: CPU seconds it has used ("" once it is gone)
+  ps -o time= -p $1 2>/dev/null | awk -F: 'NF { s = 0; for (i = 1; i <= NF; i++) s = s * 60 + $i; printf "%.2f\n", s }'
+}
 # Each run holds a fork-xemu slot and a lease while its xemu lives.
 run_one() { xemu_slot_acquire; run_one_xemu "$@"; xemu_auto_end; }
 run_one_xemu() {
@@ -248,19 +308,20 @@ run_one_xemu() {
       -monitor unix:$sock,server,nowait > $log 2>&1 &
   local pid=$! up=0 i
   xemu_lease_write $pid "bench-abx $label (arm $arm) $SNAP ${secs}s" $(( BOOT_WAIT + secs + 45 ))
-  for i in $(seq 1 30); do
+  for (( i = 0; i < 150; i++ )); do
     kill -0 $pid 2>/dev/null || break
     [[ -S $sock ]] && { up=1; break; }
-    sleep 1
+    sleep 0.2
   done
+  (( up )) && ! xemu_wait_ready $log $pid ${APPBIN[$arm]} $BOOT_WAIT && up=0
   if (( ! up )); then
     kill -9 $pid 2>/dev/null || true
     python3 $RECEIPT_PY dead --label $label --log $log --out $runjson \
-        --reason "launch failed (no monitor socket)" ${warmupflag:+--warmup} --var-value $arm || true
+        --reason "launch failed (no monitor socket or no 'xemu: ready')" \
+        ${warmupflag:+--warmup} --var-value $arm || true
     return 0
   fi
 
-  sleep $BOOT_WAIT
   local loadvm_ok=1
   python3 - "$sock" "$SNAP" >> $log 2>&1 <<'EOF' || loadvm_ok=0
 import socket, sys, time
@@ -283,11 +344,17 @@ EOF
     return 0
   fi
 
+  # Process CPU % per 5 s tick, from the CPU time it used over that tick
+  # (ps's own %cpu is a decaying average).
   : > $cpul
-  local j n=$((secs / 5))
+  local j n=$((secs / 5)) c0 c1 t0 t1
+  c0=$(cpu_secs $pid) t0=$EPOCHREALTIME
   for j in $(seq 1 $n); do
     sleep 5
-    ps -o %cpu= -p $pid >> $cpul 2>/dev/null || break
+    c1=$(cpu_secs $pid) t1=$EPOCHREALTIME
+    [[ -n $c0 && -n $c1 ]] || break
+    printf '%.1f\n' $(( (c1 - c0) * 100.0 / (t1 - t0) )) >> $cpul
+    c0=$c1 t0=$t1
     if (( SCREENSHOT )) && [[ $j -eq $(( (n + 1) / 2 )) ]]; then
       # Own file: xemu's non-append stdout redirect overwrites bytes
       # appended to the shared log.
@@ -310,7 +377,7 @@ EOF
     return 0
   fi
 
-  python3 $RECEIPT_PY gate --label $label --log $log --out $runjson \
+  python3 $RECEIPT_PY gate --label $label --log $log --out $runjson --cpu $cpul \
       --summarizer $SUMMARIZER --band $DRAWS_BAND --cv-max $CV_MAX \
       ${warmupflag:+--warmup} --var-value $arm || true
   echo "$(date +%H:%M:%S) $label end (load $(sysctl -n vm.loadavg | awk '{print $2}'))" >> $OUT/timeline.txt
@@ -341,19 +408,24 @@ for arm in B E; do
                     awk 'NR > 1 { printf " + " } { printf "%s", $0 }')
 done
 META=$OUT/meta.json
-python3 - "$META" <<EOF
-import json, platform, subprocess
-arm = lambda a, d, s, m, e, v: {"git_describe": d, "binary_sha256": s,
-                                "moltenvk_version": m, "vk_driver": v,
-                                "env": e, "app_source": a}
+# (the config sets reach Python through the environment: their TOML
+# values may hold quotes)
+ABX_B_SET=$B_SET ABX_E_SET=$E_SET python3 - "$META" <<EOF
+import json, os, platform, subprocess
+bset, eset = os.environ["ABX_B_SET"], os.environ["ABX_E_SET"]
+arm = lambda a, d, s, m, e, v, c: {"git_describe": d, "binary_sha256": s,
+                                   "moltenvk_version": m, "vk_driver": v,
+                                   "env": e, "set": c, "app_source": a}
+sets = ", set B '%s' / E '%s'" % (bset, eset) if bset + eset else ""
 json.dump({
   "config": {
-    "experiment": ("one bundle, B '$B_ENV' vs E '$E_ENV'" if "$SHARED" == "1"
+    "experiment": ("one bundle, B '$B_ENV' vs E '$E_ENV'" + sets if "$SHARED" == "1"
                    else "cross-binary arms B vs E" + (", env B '$B_ENV' / E '$E_ENV'"
-                                                      if "$B_ENV$E_ENV" else "")),
+                                                      if "$B_ENV$E_ENV" else "") + sets),
     "snapshot": "$SNAP", "env_var": "(per-arm env sets)", "pairs": int("$PAIRS"),
     "secs": int("$SECS"), "draws_band": "$DRAWS_BAND", "cv_max": float("$CV_MAX"),
-    "boot_wait": int("$BOOT_WAIT"),
+    "cap_fps": float("$CAP_FPS"),
+    "boot_wait": int("$BOOT_WAIT"), "boot_wait_from": "xemu: ready",
     "warmups": 1 if "$ONE_WARMUP" == "1" else 2,
     "cache_isolation": "$CACHE_ISO",
     "cache_base": {"B": "${BASE[B]}", "E": "${BASE[E]}"},
@@ -362,11 +434,12 @@ json.dump({
   "binary": {
     "arms": {
       "B": arm("$B_APP_SRC", "${IDENT_DESC[B]}", "${IDENT_SHA[B]}", "${IDENT_MVK[B]}", "${ENVSET[B]}",
-               "${IDENT_DRV[B]:-unknown}"),
+               "${IDENT_DRV[B]:-unknown}", bset),
       "E": arm("$E_APP_SRC", "${IDENT_DESC[E]}", "${IDENT_SHA[E]}", "${IDENT_MVK[E]}", "${ENVSET[E]}",
-               "${IDENT_DRV[E]:-unknown}"),
+               "${IDENT_DRV[E]:-unknown}", eset),
     },
     "app_clone": "$APP_CLONE", "config_path": "${CONF[E]}",
+    "config_paths": {"B": "${CONF[B]}", "E": "${CONF[E]}"},
     "hdd_clone": "$HDD", "hdd_source": "$HDD_SRC",
   },
   "session": {
