@@ -7,7 +7,16 @@ relies on this; PROMPT-7 A; the Windows bench carries only the marker):
   - carries the argv marker `-name xemu-fork-auto` right after the
     binary (MARK), so `ps -axo command` tells it from the owner's
     interactive xemu, which never has it;
-  - runs under `nice -n 10` (NICE), as the harness's sandboxes do;
+  - runs under `nice -n 10` (NICE), as the harness's sandboxes do, but
+    out of PRIO_DARWIN_BG (`taskpolicy -b`: PRI 4, efficiency cores,
+    throttled I/O; a 7.5 s run took 37 minutes): importing this module
+    clears both halves of it on the launcher (setpriority on itself, and
+    `taskpolicy -B -p` for the half an ancestor's `taskpolicy -b -p`
+    left), popen() clears it on each xemu's pid, run() again right before
+    its exec; a PRI 4 that stays is named on stderr;
+  - never runs from a checkout's dist/ (the owner's bundle; from a lane
+    worktree, the main tree's too): popen() and run() refuse such a
+    binary;
   - holds one of XEMU_FORK_SLOTS (default 4) machine-wide slots for as
     long as it runs: flock(2) on <lease dir>/slots/<i>.lock, through a
     descriptor the xemu inherits. A flock lock belongs to the open file,
@@ -51,8 +60,12 @@ reads it; tests point the variable elsewhere). A moved lease dir has its
 own leases and slots, but /tmp/xemu-leases/owner-demo.json is honoured
 either way: the override never turns the demo guard off.
 
-zsh twin: scripts/xemu-lease.zsh. `python3 xemu_lease.py` lists the live
-leases and sweeps the stale ones. A launch by hand takes a slot too:
+zsh twin: scripts/xemu-lease.zsh, which reads AUTOMATION_ENV from
+`python3 xemu_lease.py --automation-env` (one name a line).
+`python3 xemu_lease.py` lists the live leases, with CPU against runnable
+seconds for those past their expected end, and sweeps the stale ones; a
+launcher waiting for a slot names those holders each minute. A launch by
+hand takes a slot too:
 
     python3 scripts/xemu_lease.py run [--env K=V]... [--purpose TEXT] \
         [--secs N] -- <xemu> -config_path <scratch toml> [args...]
@@ -67,12 +80,153 @@ XEMU_BASE_PATH (no such string in it: any build from a tree without
 xemu.toml in Contents/Resources): it would keep its caches in the
 owner's pref dir.
 """
-import contextlib, json, os, subprocess, sys, time
+import contextlib, ctypes, ctypes.util, json, os, subprocess, sys, time
 
 try:
     import fcntl
 except ImportError:  # Windows: no slots or leases, the marker still applies
     fcntl = None
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Python 3.12+ names it; /usr/bin/python3 (3.9) has only the raw value.
+PRIO_DARWIN_PROCESS = getattr(os, 'PRIO_DARWIN_PROCESS', 4)
+TASKPOLICY = '/usr/sbin/taskpolicy' if os.path.exists('/usr/sbin/taskpolicy') else 'taskpolicy'
+
+
+def ps_pri(pid):
+    """ps's PRI for pid (4 or less: PRIO_DARWIN_BG; nice leaves it at 31),
+    or None."""
+    try:
+        s = subprocess.run(['ps', '-o', 'pri=', '-p', str(pid)], capture_output=True,
+                           text=True).stdout.strip()
+    except OSError:
+        return None
+    return int(s) if s.isdigit() else None
+
+
+def clear_background(pid=0):
+    """Take pid (0: this process) out of PRIO_DARWIN_BG. XNU keeps it in
+    two halves, and setpriority(PRIO_DARWIN_PROCESS) reaches one of them:
+    on its own pid the internal one (`taskpolicy -b CMD`), on another pid
+    the external one (`taskpolicy -b -p PID`, which children inherit);
+    getpriority on another pid doesn't read that pid's state. So for this
+    process ps's PRI tells, and the external half is cleared from another
+    process (`taskpolicy -B -p`, as xemu-lease.zsh does); another pid is
+    cleared blind. True if this process was at PRI 4 (another pid: False)."""
+    if sys.platform != 'darwin' or not hasattr(os, 'setpriority'):
+        return False
+    if pid not in (0, os.getpid()):
+        with contextlib.suppress(OSError):
+            os.setpriority(PRIO_DARWIN_PROCESS, pid, 0)
+        return False
+    pri = ps_pri(os.getpid())
+    if pri is not None and pri > 4:
+        return False
+    with contextlib.suppress(OSError):
+        os.setpriority(PRIO_DARWIN_PROCESS, 0, 0)   # the internal half
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run([TASKPOLICY, '-B', '-p', str(os.getpid())], capture_output=True)
+    return pri is not None
+
+
+def leave_background(who):
+    """clear_background() on this process, saying so on stderr (who: the
+    launcher, or the xemu run() is about to exec); the result is checked."""
+    if not clear_background():
+        return
+    pri = ps_pri(os.getpid())
+    if pri is not None and pri <= 4:
+        print(f'lease: {who} is at PRIO_DARWIN_BG (PRI {pri}) and taskpolicy -B could not '
+              'clear it: expect xemu to run many times slower', file=sys.stderr, flush=True)
+    else:
+        print(f'lease: {who} was at PRIO_DARWIN_BG (PRI 4); cleared', file=sys.stderr, flush=True)
+
+
+leave_background('launcher')
+
+
+def _main_tree():
+    """The main checkout when REPO is a lane worktree (git's common dir's
+    parent), else REPO."""
+    try:
+        r = subprocess.run(['git', '-C', REPO, 'rev-parse', '--git-common-dir'],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return REPO
+    common = r.stdout.strip()
+    if r.returncode or not common:
+        return REPO
+    return os.path.dirname(os.path.realpath(os.path.join(REPO, common)))
+
+
+_dist_roots = []
+
+
+def in_dist(path):
+    """True if path lies in a checkout's dist/ (the owner's bundle): this
+    one's, the main tree's when this is a lane worktree, or any D/dist/
+    whose D holds scripts/xemu_lease.py."""
+    if not _dist_roots:
+        _dist_roots.extend({os.path.realpath(os.path.join(t, 'dist')) for t in (REPO, _main_tree())})
+    p = os.path.realpath(path)
+    if any(p == d or p.startswith(d + os.sep) for d in _dist_roots):
+        return True
+    d = p
+    while os.path.dirname(d) != d:
+        if os.path.basename(d) == 'dist' and os.path.isfile(
+                os.path.join(os.path.dirname(d), 'scripts', 'xemu_lease.py')):
+            return True
+        d = os.path.dirname(d)
+    return False
+
+
+def refuse_dist(binary):
+    if in_dist(binary):
+        raise RuntimeError(f"lease: refusing {binary}: dist/ is the owner's bundle; launch a "
+                           'clone (cp -Rc dist/xemu.app /tmp/x.app, or scripts/refresh-clone.sh)')
+
+
+class RusageV4(ctypes.Structure):
+    _fields_ = [('uuid', ctypes.c_uint8 * 16)] + [(n, ctypes.c_uint64) for n in (
+        'user_time system_time pkg_idle_wkups interrupt_wkups pageins wired_size '
+        'resident_size phys_footprint proc_start_abstime proc_exit_abstime '
+        'child_user_time child_system_time child_pkg_idle_wkups '
+        'child_interrupt_wkups child_pageins child_elapsed_abstime '
+        'diskio_bytesread diskio_byteswritten qos_default qos_maintenance '
+        'qos_background qos_utility qos_legacy qos_user_initiated '
+        'qos_user_interactive billed_system_time serviced_system_time '
+        'logical_writes lifetime_max_phys_footprint instructions cycles '
+        'billed_energy serviced_energy interval_max_phys_footprint '
+        'runnable_time').split()]
+
+
+class _Timebase(ctypes.Structure):
+    _fields_ = [('numer', ctypes.c_uint32), ('denom', ctypes.c_uint32)]
+
+
+_libproc, TICK_S = None, 0.0   # rusage times are mach ticks (41.67 ns on Apple silicon)
+if sys.platform == 'darwin':
+    _libproc = ctypes.CDLL(ctypes.util.find_library('proc') or '/usr/lib/libproc.dylib')
+    _tb = _Timebase()
+    ctypes.CDLL(None).mach_timebase_info(ctypes.byref(_tb))
+    TICK_S = _tb.numer / _tb.denom / 1e9
+
+
+def rusage(pid):
+    """proc_pid_rusage(pid, RUSAGE_INFO_V4), or None (gone, or not macOS)."""
+    r = RusageV4()
+    if _libproc is None or _libproc.proc_pid_rusage(pid, 4, ctypes.byref(r)) != 0:
+        return None
+    return r
+
+
+def cpu_runnable(pid):
+    """(CPU, runnable) seconds of pid, summed over its threads (runnable =
+    on a core or waiting for one), or None."""
+    r = rusage(pid)
+    return None if r is None else ((r.user_time + r.system_time) * TICK_S,
+                                   r.runnable_time * TICK_S)
+
 
 MARKER = 'xemu-fork-auto'
 MARK = ['-name', MARKER]
@@ -151,6 +305,40 @@ def sweep():
                 os.remove(f)
         except OSError:
             pass
+
+
+def leases():
+    """The lease records in the lease dir, by pid (unparsable ones skipped)."""
+    try:
+        names = sorted(os.listdir(LEASE_DIR))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        if n.endswith('.json') and n[:-5].isdigit():
+            with contextlib.suppress(OSError, ValueError):
+                r = json.load(open(os.path.join(LEASE_DIR, n)))
+                if isinstance(r, dict) and 'pid' in r:
+                    out.append(r)
+    return out
+
+
+def overdue(rec, now=None):
+    """For a live lease past its expected_end: 'N s past its expected end;
+    C s CPU, R s runnable over E s' (runnable far above CPU: starved; both
+    far below E: stuck), else ''."""
+    now = now or time.time()
+    end, pid = rec.get('expected_end_epoch'), rec.get('pid')
+    if not isinstance(end, (int, float)) or not isinstance(pid, int) or now <= end \
+            or not _is_ours(pid):
+        return ''
+    s = f'{now - end:.0f} s past its expected end'
+    t = cpu_runnable(pid)
+    if t:
+        s += f'; {t[0]:.1f} s CPU, {t[1]:.1f} s runnable'
+        if isinstance(rec.get('started_epoch'), (int, float)):
+            s += f' over {now - rec["started_epoch"]:.0f} s'
+    return s
 
 
 def owner_demo_files():
@@ -265,6 +453,12 @@ class Slot:
             if not quiet and (said is None or w - said >= 60):
                 print(f'lease: all {n} fork-xemu slots busy (XEMU_FORK_SLOTS); waiting',
                       file=sys.stderr, flush=True)
+                for r in leases():
+                    late = overdue(r)
+                    if late:
+                        print(f'lease:   slot {r.get("slot")} holder pid {r["pid"]} '
+                              f'({r.get("who")}: {r.get("purpose")}) is {late}',
+                              file=sys.stderr, flush=True)
                 said = w
             time.sleep(2)
 
@@ -314,7 +508,10 @@ def popen(cmd, purpose, expected_secs, keep=(), **kw):
     """subprocess.Popen(auto_cmd(cmd), **kw) inside a slot and a lease,
     with environ(kw's env, keep). nice execs xemu, so proc.pid is xemu's
     pid, and xemu inherits the slot's descriptor. On exit a still-running
-    xemu is killed, then the lease goes."""
+    xemu is killed, then the lease goes. Refuses a binary in dist/; takes
+    the xemu out of PRIO_DARWIN_BG (on its pid, not in a preexec_fn:
+    bench-det launches from threads), saying so if PRI 4 stays."""
+    refuse_dist(cmd[0])
     kw['env'] = environ(kw.get('env'), keep)
     slot = Slot()
     proc = None
@@ -322,6 +519,11 @@ def popen(cmd, purpose, expected_secs, keep=(), **kw):
         if slot.fd is not None:
             kw['pass_fds'] = tuple(kw.get('pass_fds', ())) + (slot.fd,)
         proc = subprocess.Popen(auto_cmd(cmd), **kw)
+        clear_background(proc.pid)
+        pri = ps_pri(proc.pid) if sys.platform == 'darwin' else None
+        if pri is not None and pri <= 4:
+            print(f'lease: xemu pid {proc.pid} stays at PRIO_DARWIN_BG (PRI {pri}): expect it '
+                  'to run many times slower', file=sys.stderr, flush=True)
         slot.handoff()
         if fcntl is not None:
             write_lease(proc.pid, purpose, expected_secs, slot.index)
@@ -363,6 +565,9 @@ def run(argv):
     cmd = a.cmd[1:] if a.cmd[:1] == ['--'] else a.cmd
     if not cmd or not os.access(cmd[0], os.X_OK):
         ap.error('needs -- <xemu binary> [args]')
+    if in_dist(cmd[0]):
+        ap.error(f"{cmd[0]} is in dist/, the owner's bundle: launch a clone "
+                 '(cp -Rc dist/xemu.app /tmp/x.app)')
     if '-config_path' not in cmd:
         ap.error('needs -config_path <scratch toml>: xemu saves its config at exit')
     if not knows_base_path(cmd[0]):
@@ -382,26 +587,26 @@ def run(argv):
         write_lease(os.getpid(), a.purpose, a.secs, slot.index, who='xemu_lease.py run')
     if hasattr(os, 'nice'):
         os.nice(10)
+    leave_background('xemu')   # again, right before the exec: the xemu keeps its state
     os.execve(cmd[0], [cmd[0]] + MARK + cmd[1:], env)
 
 
 def main():
     if sys.argv[1:2] == ['run']:
         run(sys.argv[2:])
+    if sys.argv[1:2] == ['--automation-env']:   # for xemu-lease.zsh
+        print('\n'.join(AUTOMATION_ENV))
+        return
     sweep()
     found = owner_demo()
     if found is not None:
         print(f'owner demo running ({found[0]}): {json.dumps(found[1])}')
-    try:
-        names = sorted(os.listdir(LEASE_DIR))
-    except OSError:
-        names = []
-    for n in names:
-        if n.endswith('.json') and n[:-5].isdigit():
-            with contextlib.suppress(OSError, ValueError, KeyError):
-                r = json.load(open(os.path.join(LEASE_DIR, n)))
-                print(f'{r["pid"]:>6} slot {r.get("slot")} {r["who"]}: {r["purpose"]} '
-                      f'(started {r["started"]}, expected end {r["expected_end"]})')
+    for r in leases():
+        with contextlib.suppress(KeyError, ValueError, TypeError):
+            late = overdue(r)
+            print(f'{r["pid"]:>6} slot {r.get("slot")} {r["who"]}: {r["purpose"]} '
+                  f'(started {r["started"]}, expected end {r["expected_end"]})'
+                  + (f': {late}' if late else ''))
 
 
 if __name__ == '__main__':

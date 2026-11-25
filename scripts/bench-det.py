@@ -3,7 +3,8 @@
 
     bench-det.py [-n PAIRS] [-f FRAMES] [-t TAG] [-i LINE]... [--hash-at F,F]
                  [--icount ARGS] [--renderer null|offscreen] [--out FILE]
-                 [--shot DIR] [--dvd ISO] NAME=APP[:K=V,K=V] ...
+                 [--shot DIR] [--dvd ISO] [--timeout-scale X] [--bundle APP]
+                 NAME=APP[:K=V,K=V] ...
 
 Each run clones the source config ($XEMU_TEST_CONFIG, else
 ../fixtures/xemu.toml) and the HDD and EEPROM it names into a fresh temp
@@ -12,6 +13,28 @@ null renderer under `-S -icount shift=2,align=off,sleep=off`, loads TAG
 (`-` boots cold), writes the -i pipe lines, advances FRAMES frames and
 hashes guest RAM (sha256[:16]: QMP xemu-ram-digest, or xemu-dump-ram's
 file on builds without it). Arms run interleaved, PAIRS times.
+
+APP is a bundle clone, or a bare binary (new=build/qemu-system-i386),
+which runs in a temp clone of --bundle (default dist/xemu.app, only ever
+cloned) made by scripts/refresh-clone.sh. An APP inside dist/ is refused.
+Each arm's identity prints first: the version, commit and build date
+embedded in the binary (`= HEAD` when it is the checkout's), its
+sha256[:12], arch, debug or release, and the PGO state where it shows
+(an instrumented binary, or a bare binary's build.ninja).
+
+A run fails, and keeps its log as /tmp/xbd-fail.<pid>.<label>.log,
+when xemu exits nonzero after quit, or a QMP reply takes over
+30 + FRAMES/20 s (the failure line names the xemu's priority, its CPU
+against runnable seconds and the load). --timeout-scale X multiplies
+that and the start-up waits (default 1; 4 for an arm whose binary is a
+debug or PGO-instrumented build, pgo-train's runs included). A run's
+violations=/VIOLATION/assert/refute log lines (a refuter arm's counts,
+an assert) print under its line; a VIOLATION event, a nonzero
+violations= count, a refute line's nonzero misses= or unset=, or a
+tlb-wclean miss fails the run, so a refuter arm beside new=
+(ref=build/qemu-system-i386:XEMU_X87_REFUTE=1) is pass/fail. So does
+xemu's complaint about an arm's own config key (unrecognized, wrong
+type, invalid value: it ran on the default).
 
 --renderer offscreen runs Vulkan instead (XEMU_HEADLESS=1) on a portable
 clone of APP whose shader and pipeline caches stay in the run dir (cold
@@ -25,6 +48,10 @@ per driver.
 An arm's K=V list splits at a comma only where NAME= follows it, so a
 value may hold commas as long as none is followed by NAME=:
 kk=/tmp/e.app:XEMU_VK_DRIVER=kosmickrisp,MESA_KK_DISABLE_WORKAROUNDS=2,6,17
+A K with a dot is a config key, written into each run's scratch toml by
+`harness-config.py --set` (TABLE.KEY=VALUE, the last dot splits them;
+checked against config_spec.yml), e.g.
+off=/tmp/e.app:perf.async_pipeline_compile=false
 
 --shot DIR saves each run's picture at its final stop (a rendered one
 needs --renderer offscreen: the null renderer's is the VGA scanout, mostly
@@ -37,7 +64,10 @@ pixels. Its sha256[:12] prints as png=, beside the RAM hash, and never
 counts as a RAM difference. Compare pictures only from the same
 -f/--hash-at schedule, by pixel-difference counts rather than sha (an
 f900 picture of a 900,1800 schedule is a separate `-f 900 --shot` run,
-without --hash-at, whose last stop would set the picture).
+without --hash-at, whose last stop would set the picture). At the end,
+each arm's pictures are diffed against the first arm's of the same run
+(scripts/score_shot.py's diff: differing pixels, those off by more than
+32, PSNR and the KK bar).
 --dvd ISO passes -dvd_path ISO to every run (no clone: pass a clone).
 
 Per run it reports wall fps and, from proc_pid_rusage, the host cycles
@@ -55,31 +85,36 @@ hash unless the change is meant to.
 Run dirs are /tmp/xbd.<bench-det pid>.*; each start removes the ones a
 killed bench-det left (owner gone and no live process naming the dir).
 
-Each xemu runs as scripts/xemu_lease.py says: `nice -n 10`, the argv
-marker `-name xemu-fork-auto`, one of XEMU_FORK_SLOTS (4) slots, a lease
-in /tmp/xemu-leases, XEMU_BASE_PATH set to the bench cache, and none of
-the automation variables this process inherited (XEMU_RAM_SHM,
-XEMU_VK_DRIVER, ...; an arm's own K=V stays, even when it equals the
-exported value).
+Each xemu runs as scripts/xemu_lease.py says: `nice -n 10` (taken out
+of PRIO_DARWIN_BG, named on stderr if PRI 4 stays), the argv marker `-name xemu-fork-auto`, one of
+XEMU_FORK_SLOTS (4) slots, a lease in /tmp/xemu-leases, XEMU_BASE_PATH
+set to the bench cache, and none of the automation variables this
+process inherited (XEMU_RAM_SHM, XEMU_VK_DRIVER, ...; an arm's own K=V
+stays, even when it equals the exported value).
 
 Example: bench-det.py -n 4 base=/tmp/b.app new=/tmp/e.app
 (an arm can add env: new=/tmp/e.app:XEMU_GUEST_MO=1)
 
 --check goldens NAME=APP ...: runs every golden of scripts/det-goldens.json
 (heavy-f1 to 300 and 1200, stream-e2 600 walking, cold boot 900 and 1800),
-each in a fresh process, up to -j (default 3) at once, and asserts the
-hashes for the binary's arch and the config's mem_limit; arms with no
-golden key (or a refuter in their env) only have to agree. --check
-tags:FILE runs each tag in FILE (one a line) for -f frames (default 300)
-and asserts the arms agree. --check d98 runs tests/azurik pack 03 (the
-four scenes of tests/azurik/03-heavy-scenes/scenes.json, RAM at +300 and
-+600, the fight scene on its first candidate's 70 lines) on the Modkit's
-D98 fixtures: AZURIK_FX names their folder (never a committed path); its
-xemu.toml is each run's source config, and one cp -c clone of its
-vanilla.iso per batch is every run's -dvd_path. Its hashes are asserted
-from det-goldens.json's "d98" table. One line per run, then exit 0 (all
-OK), 2 (arms disagree), 4 (a golden moved) or 1 (a run failed). Wall and
-cycle numbers from parallel runs contend: --check is a gate, not an A/B.
+each in a fresh process, up to -j (default XEMU_FORK_SLOTS, 4) at once,
+and asserts the hashes for the binary's arch and the config's mem_limit
+(an arm's sys.mem_limit key wins); arms with no golden key (a refuter in
+their env, another sys.* config key) only have to agree.
+--check tags:FILE runs each tag in FILE (one a line) for -f frames
+(default 300) and asserts the arms agree. --check d98 runs tests/azurik
+pack 03 (the four scenes of tests/azurik/03-heavy-scenes/scenes.json, RAM
+at +300 and +600, the fight scene on its first candidate's 70 lines) on
+the Modkit's D98 fixtures: AZURIK_FX names their folder (never a
+committed path; unset, d98 prints `skipped`); its xemu.toml is each run's
+source config, and one cp -c clone of its vanilla.iso per batch is every
+run's -dvd_path. Its hashes are asserted from det-goldens.json's "d98"
+table. A comma list runs its sets in one batch; the per-change gate is
+one arm, `--check goldens,d98 new=build/qemu-system-i386`. One line per
+run, then exit 0 (all OK), 2 (arms disagree), 4 (a golden moved) or 1 (a
+run failed, or the sets gave no runs: d98 alone without AZURIK_FX, an
+empty tags file). Wall and cycle numbers from parallel runs contend:
+--check is a gate, not an A/B.
 
 --timeline: a cold boot of the fixture disc (or --dvd) from power-on to
 steady play, cut into phases: kernel, logos, prophecy (0x5F748 to
@@ -103,9 +138,9 @@ run --hdd-io, system_reset, then the same phases from the reset; a
 Example: bench-det.py --timeline -n 2 base=/tmp/a.app new=/tmp/b.app
          bench-det.py --timeline --from-state vanilla-ig-w1 --dvd grown.iso -n 20 base=/tmp/a.app
 """
-import argparse, bisect, contextlib, csv, ctypes, ctypes.util, hashlib, importlib.util, json
+import argparse, bisect, contextlib, csv, ctypes, hashlib, importlib.util, json, math
 import os, re, shutil
-import socket, statistics, subprocess, sys, tempfile, time
+import socket, statistics, subprocess, sys, tempfile, threading, time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The source config, as for every harness: $XEMU_TEST_CONFIG, else
@@ -115,50 +150,46 @@ CFG = os.environ.get('XEMU_TEST_CONFIG') or os.path.join(
     os.path.dirname(REPO), 'fixtures', 'xemu.toml')
 _spec = importlib.util.spec_from_file_location(
     'xemu_lease', os.path.join(REPO, 'scripts/xemu_lease.py'))
-lease = importlib.util.module_from_spec(_spec)  # marker, nice, slot, lease, bench cache
+lease = importlib.util.module_from_spec(_spec)  # marker, nice, slot, lease, bench cache, rusage
 _spec.loader.exec_module(lease)
-
-_libproc = ctypes.CDLL(ctypes.util.find_library('proc') or '/usr/lib/libproc.dylib')
-
-
-class _RusageV4(ctypes.Structure):
-    _fields_ = [('uuid', ctypes.c_uint8 * 16)] + [(n, ctypes.c_uint64) for n in (
-        'user_time system_time pkg_idle_wkups interrupt_wkups pageins wired_size '
-        'resident_size phys_footprint proc_start_abstime proc_exit_abstime '
-        'child_user_time child_system_time child_pkg_idle_wkups '
-        'child_interrupt_wkups child_pageins child_elapsed_abstime '
-        'diskio_bytesread diskio_byteswritten qos_default qos_maintenance '
-        'qos_background qos_utility qos_legacy qos_user_initiated '
-        'qos_user_interactive billed_system_time serviced_system_time '
-        'logical_writes lifetime_max_phys_footprint instructions cycles '
-        'billed_energy serviced_energy interval_max_phys_footprint '
-        'runnable_time').split()]
+_RusageV4, _libproc = lease.RusageV4, lease._libproc   # cast-probe reads these
+_TICK_S, _Timebase, _tb = lease.TICK_S, lease._Timebase, getattr(lease, '_tb', None)   # importers
 
 
-class _Timebase(ctypes.Structure):
-    _fields_ = [('numer', ctypes.c_uint32), ('denom', ctypes.c_uint32)]
-
-
-_tb = _Timebase()
-ctypes.CDLL(None).mach_timebase_info(ctypes.byref(_tb))
-_TICK_S = _tb.numer / _tb.denom / 1e9   # rusage times are mach ticks (41.67 ns on Apple silicon)
+class RunFailed(RuntimeError):
+    """A run that failed: its message names why (and the kept log)."""
 
 
 def counters(pid, times=False):
     """(instructions, cycles) of the whole process; with times, also CPU and
     runnable seconds (runnable = on a core or waiting for one, all threads)."""
-    r = _RusageV4()
-    if _libproc.proc_pid_rusage(pid, 4, ctypes.byref(r)) != 0:  # RUSAGE_INFO_V4
+    r = lease.rusage(pid)
+    if r is None:
         raise OSError('proc_pid_rusage failed')
     if times:
-        return (r.instructions, r.cycles, (r.user_time + r.system_time) * _TICK_S,
-                r.runnable_time * _TICK_S)
+        return (r.instructions, r.cycles, (r.user_time + r.system_time) * lease.TICK_S,
+                r.runnable_time * lease.TICK_S)
     return r.instructions, r.cycles
 
 
+def stalled(pid, what):
+    """what, plus why a run may stall: the xemu's priority (4: PRIO_DARWIN_BG),
+    its CPU against runnable seconds, and the load."""
+    pri = subprocess.run(['ps', '-o', 'pri=', '-p', str(pid)], capture_output=True,
+                         text=True).stdout.strip() or '?'
+    t = lease.cpu_runnable(pid)
+    load = os.getloadavg()
+    return (f'{what} (xemu pid {pid} pri {pri}'
+            + (f', {t[0]:.1f} s CPU, {t[1]:.1f} s runnable' if t else '')
+            + f'; load {load[0]:.1f}; --timeout-scale raises the limit)')
+
+
 class QMP:
-    def __init__(self, path, proc):
+    def __init__(self, path, proc, timeout=None):
+        """timeout: seconds any one reply may take (None: no limit), then
+        RunFailed."""
         self.s = socket.socket(socket.AF_UNIX)
+        self.proc, self.timeout = proc, timeout
         for _ in range(1200):
             try:
                 self.s.connect(path)
@@ -169,14 +200,22 @@ class QMP:
                 time.sleep(0.05)
         self.f = self.s.makefile('rw')
         self.events = []
-        self.f.readline()
+        self._line('the QMP greeting')
         self.cmd('qmp_capabilities')
+
+    def _line(self, what):
+        self.s.settimeout(self.timeout)
+        try:
+            return self.f.readline()
+        except socket.timeout:
+            raise RunFailed(stalled(self.proc.pid, f'{what}: no reply in {self.timeout:g} s')) \
+                from None
 
     def cmd(self, name, **args):
         self.f.write(json.dumps({'execute': name, 'arguments': args}) + '\n')
         self.f.flush()
         while True:
-            r = json.loads(self.f.readline() or '{"error": "EOF"}')
+            r = json.loads(self._line(name) or '{"error": "EOF"}')
             if 'event' in r:
                 self.events.append(r['event'])
                 continue
@@ -205,8 +244,10 @@ class QMP:
 def wait_log(log, text, count, proc, timeout=120):
     end = time.time() + timeout
     while open(log, errors='replace').read().count(text) < count:
-        if proc.poll() is not None or time.time() > end:
-            raise RuntimeError(f'no "{text}" in {log}')
+        if proc.poll() is not None:
+            raise RunFailed(f'xemu exited {proc.returncode} before "{text}"')
+        if time.time() > end:
+            raise RunFailed(stalled(proc.pid, f'no "{text}" in {timeout:g} s'))
         time.sleep(0.01)
 
 
@@ -217,18 +258,23 @@ def cfg_path(key, cfg=None):
     return m and m.group(1)
 
 
-def harness_config(toml, d, hdd, eeprom, dvd=''):
+def harness_config(toml, d, hdd, eeprom, dvd='', sets=()):
     """scripts/harness-config.py --workdir d on the scratch toml (the clones,
-    screenshots in d, fullscreen off, muted, pads stubbed): its pad args."""
+    screenshots in d, fullscreen off, muted, pads stubbed; sets: config
+    keys, a {TABLE.KEY: VALUE} dict or TABLE.KEY=VALUE strings): its pad
+    args."""
+    sets = [f'{k}={v}' for k, v in sets.items()] if isinstance(sets, dict) else list(sets)
     return subprocess.run([sys.executable, '-I', os.path.join(REPO, 'scripts/harness-config.py'),
                            toml, '--workdir', d, '--hdd', hdd, '--eeprom', eeprom]
-                          + (['--dvd', os.path.abspath(dvd)] if dvd else []),
+                          + (['--dvd', os.path.abspath(dvd)] if dvd else [])
+                          + [x for kv in sets for x in ('--set', kv)],
                           stdout=subprocess.PIPE, text=True, check=True).stdout.split()
 
 
-def scratch(d, cfg=None, dvd=''):
+def scratch(d, cfg=None, dvd='', sets=()):
     """Clone the source config's (default CFG) HDD, EEPROM and config (muted,
-    pads stubbed; dvd_path = dvd when given) into d."""
+    pads stubbed; dvd_path = dvd when given; sets as harness_config's) into
+    d."""
     cfg = cfg or CFG
     for key, name, dst in (('hdd_path', 'xbox_hdd.qcow2', 'hdd.qcow2'),
                            ('eeprom_path', 'eeprom.bin', 'eeprom.bin')):
@@ -236,7 +282,7 @@ def scratch(d, cfg=None, dvd=''):
         subprocess.run(['cp', '-c', src, os.path.join(d, dst)], check=True)
     toml = os.path.join(d, 'xemu.toml')
     shutil.copyfile(cfg, toml)
-    pads = harness_config(toml, d, f'{d}/hdd.qcow2', f'{d}/eeprom.bin', dvd)
+    pads = harness_config(toml, d, f'{d}/hdd.qcow2', f'{d}/eeprom.bin', dvd, sets)
     fifo, sock, log = (os.path.join(d, n) for n in ('in.fifo', 'qmp.sock', 'log'))
     os.mkfifo(fifo)
     return toml, pads, fifo, sock, log
@@ -335,13 +381,100 @@ def check_driver(name, env, driver):
 
 
 LIVE = set()   # running xemus (--check kills them on an interrupt)
+STOP = threading.Event()   # set on an interrupt: the killed runs keep no logs
+# Log lines a run prints under its line: violation counts, asserts, the
+# refuters' reports (XEMU_TLB_WCLEAN_REFUTE's `refute ... misses=N unset=N`
+# and its `tlb-wclean miss` lines, XEMU_TLB_REVAL_REFUTE's last words
+# before its abort). BAD fails the run: a VIOLATION event, a nonzero
+# violations=, misses= or unset= count on a refute line, a tlb-wclean miss.
+NOTE = re.compile(r'(?i)violation|assert|refute|tlb-wclean miss')
+BAD = re.compile(r'VIOLATION(?!S)|(?i:violations)=[1-9]|refute.*\b(?:misses|unset)=[1-9]'
+                 r'|tlb-wclean miss|tlb-reval refute: (?:kept|a cross-page)')
+# genconfig's complaints about a key (subprojects/genconfig/cnode.h): one
+# about an arm's own config key fails the run (xemu ran on the default).
+GENCONFIG = re.compile(r"(?:unrecognized|incorrect type for|invalid value for) key '([^']*)'")
 
 
-def run_once(app, env, a, purpose='', label='run'):
-    shot, dvd = getattr(a, 'shot', ''), getattr(a, 'dvd', '')   # pgo-train's Namespace has neither
-    d = scratch_dir()
+def split_env(env):
+    """An arm's K=V as (environment, config keys): a K with a dot is a
+    TABLE.KEY for harness-config.py --set."""
+    return ({k: v for k, v in env.items() if '.' not in k},
+            {k: v for k, v in env.items() if '.' in k})
+
+
+def log_notes(log, cap=12, keys=()):
+    """(the log's NOTE lines, and genconfig's complaints about a config key
+    in keys, at most cap; True if one fails the run: BAD, or a key in keys
+    xemu didn't take)."""
     try:
-        toml, pads, fifo, sock, log = scratch(d, getattr(a, 'config', '') or None, dvd)
+        text = open(log, errors='replace').read().splitlines()
+    except OSError:
+        return [], False
+    lines, bad = [], False
+    for x in text:
+        g = GENCONFIG.search(x)
+        if g and g.group(1) in keys:
+            lines.append(x)
+            bad = True
+        elif NOTE.search(x):
+            lines.append(x)
+            bad = bad or bool(BAD.search(x))
+    if len(lines) > cap:
+        lines = lines[:cap] + [f'... {len(lines) - cap} more']
+    return lines, bad
+
+
+def keep_log(e, log, label, keys=()):
+    """e's message; the log, unless an interrupt killed the run, moves to
+    /tmp/xbd-fail.<pid>.<label>.log, named with its log_notes lines (keys
+    as there) and, when there are none or xemu exited or hung up, its last
+    lines."""
+    msg = str(e) or type(e).__name__
+    if STOP.is_set() or not os.path.exists(log):
+        return msg
+    notes, _ = log_notes(log, keys=keys)
+    if not notes or re.search(r'EOF|exited', msg):
+        with contextlib.suppress(OSError):
+            tail = [x for x in open(log, errors='replace').read().splitlines()
+                    if x.strip() and x not in notes][-3:]
+            notes += [f'(log tail) {x}' for x in tail]
+    kept = f'/tmp/xbd-fail.{os.getpid()}.{re.sub(r"[^A-Za-z0-9_.-]", "_", label)}.log'
+    try:
+        shutil.move(log, kept)
+    except OSError:
+        return msg
+    return msg + f'; log {kept}' + ''.join(f'\n    {x}' for x in notes)
+
+
+_scales = {}
+
+
+def auto_scale(binary):
+    """The timeout scale a binary needs unasked: 4 for a debug or
+    PGO-instrumented (generate) build, else 1 (read once per file)."""
+    try:
+        st = os.stat(binary)
+    except OSError:
+        return 1
+    k = (os.path.realpath(binary), st.st_size, st.st_mtime_ns)
+    if k not in _scales:
+        i = identity(binary)
+        _scales[k] = 4 if i['debug'] or i['pgo'] == 'generate' else 1
+    return _scales[k]
+
+
+def run_once(app, env, a, purpose='', label='run', scale=None):
+    """One run (the module docstring); scale multiplies its timeouts (default
+    a.timeout_scale, else auto_scale of APP's binary: pgo-train comes here
+    directly). Raises RunFailed, keeping the log."""
+    shot, dvd = getattr(a, 'shot', ''), getattr(a, 'dvd', '')   # pgo-train's Namespace has neither
+    scale = scale or getattr(a, 'timeout_scale', None) or auto_scale(
+        os.path.join(app, 'Contents/MacOS/xemu'))
+    env, sets = split_env(env)
+    d = scratch_dir()
+    log = os.path.join(d, 'log')
+    try:
+        toml, pads, fifo, sock, log = scratch(d, getattr(a, 'config', '') or None, dvd, sets)
         app, base, headless = renderer_target(app, a, d)
         e = run_env(env, headless, fifo, base)
         cmd = [os.path.join(app, 'Contents/MacOS/xemu'), '-config_path', toml,  # + MARK: lease.popen
@@ -349,16 +482,17 @@ def run_once(app, env, a, purpose='', label='run'):
         if dvd:
             cmd += ['-dvd_path', os.path.abspath(dvd)]
         stops = [int(x) for x in a.hash_at.split(',')] if a.hash_at else [a.frames]
+        limit = (30 + stops[-1] / 20) * scale   # any one QMP reply
         with lease.popen(cmd, purpose or f'bench-det {a.tag} {stops[-1]} frames',
-                         30 + stops[-1] // 20, keep=env, env=e, stdout=subprocess.DEVNULL,
+                         int(limit), keep=env, env=e, stdout=subprocess.DEVNULL,
                          stderr=open(log, 'w')) as proc:
             LIVE.add(proc)
-            wait_log(log, 'xemu: ready', 1, proc)
-            q = QMP(sock, proc)
+            wait_log(log, 'xemu: ready', 1, proc, 120 * scale)
+            q = QMP(sock, proc, limit)
             q.cmd('stop')
             if a.tag != '-':
                 q.cmd('human-monitor-command', **{'command-line': f'loadvm {a.tag}'})
-                wait_log(log, 'xemu: state loaded', 1, proc)
+                wait_log(log, 'xemu: state loaded', 1, proc, 120 * scale)
             if a.input:
                 fd = os.open(fifo, os.O_WRONLY)
                 os.write(fd, ('\n'.join(a.input) + '\n').encode())
@@ -374,7 +508,7 @@ def run_once(app, env, a, purpose='', label='run'):
                 ins, cyc, done = ins + i1 - i0, cyc + c1 - c0, s
                 cpu, run = cpu + u1 - u0, run + r1 - r0
                 hashes.append(f'f{s}=' + ram_sha256(q, d)[:16])
-            png = ''
+            png = f = ''
             if shot:   # the final stop only, after its RAM hash (see the docstring)
                 os.makedirs(shot, exist_ok=True)
                 f = os.path.join(os.path.abspath(shot), f'{label}-f{done}.png')
@@ -384,11 +518,24 @@ def run_once(app, env, a, purpose='', label='run'):
                 q.cmd('quit')
             except Exception:
                 pass
-            proc.wait(timeout=30)
+            try:
+                rc = proc.wait(timeout=30 * scale)
+            except subprocess.TimeoutExpired:
+                raise RunFailed(stalled(proc.pid, f'xemu still runs {30 * scale:.0f} s after quit'))
             LIVE.discard(proc)
+        if rc != 0:
+            raise RunFailed(f'xemu exited {rc} after quit')
+        notes, violated = log_notes(log, keys=sets)
+        if violated:
+            raise RunFailed(('xemu ran without a config key it was given'
+                             if any(GENCONFIG.search(x) for x in notes)
+                             else 'VIOLATION or refuter miss')
+                            + f' ({" ".join(hashes)})')
         return {'fps': done / wall, 'mcyc': cyc / done / 1e6, 'mins': ins / done / 1e6,
                 'cpu_s': cpu, 'runnable_s': run, 'ram': ' '.join(hashes), 'png': png,
-                'driver': vk_driver(log)}
+                'driver': vk_driver(log), 'png_path': f, 'notes': notes}
+    except Exception as x:
+        raise RunFailed(keep_log(x, log, label, sets)) from x
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -525,7 +672,8 @@ def tl_launch(app, env, a, d, gdb, stack):
     (marker, nice, slot, lease); stack.close() ends it. With --from-state,
     on the config's disc, then loadvm, the swap to --dvd, --hdd-io and a
     reset, all paused; the returned row times them (else None)."""
-    toml, pads, fifo, sock, log = scratch(d)
+    env, sets = split_env(env)
+    toml, pads, fifo, sock, log = scratch(d, sets=sets)
     app, base, headless = renderer_target(app, a, d)
     e = run_env(env, headless, fifo, base)
     cmd = [os.path.join(app, 'Contents/MacOS/xemu'), '-config_path', toml,  # + MARK: lease.popen
@@ -941,14 +1089,94 @@ def d98_runs(fx, iso):
              'd98', os.path.join(fx, 'xemu.toml'), iso) for s in sj['scenes']]
 
 
-def golden_key(app, env, cfg=None):
-    """(arch, mem_limit) a golden is kept for, or None (a refuter arm)."""
-    if any('REFUTE' in k for k in env):
+def golden_key(app, env, cfg=None, sets=None):
+    """(arch, mem_limit) a golden is kept for, or None (a refuter arm, or
+    one whose config keys set a sys.* key other than sys.mem_limit). The
+    arm's config keys are sets plus env's dotted keys; their
+    sys.mem_limit wins over the source config's (cfg, default CFG)."""
+    env, own = split_env(env)
+    sets = {**own, **(sets or {})}
+    if any('REFUTE' in k for k in env) or any(
+            k.startswith('sys.') and k != 'sys.mem_limit' for k in sets):
         return None
     archs = subprocess.run(['lipo', '-archs', os.path.join(app, 'Contents/MacOS/xemu')],
                            capture_output=True, text=True).stdout.split()
-    m = re.search(r"(?m)^\s*mem_limit\s*=\s*'?(\d+)", open(cfg or CFG).read())
+    if 'sys.mem_limit' in sets:
+        m = re.match(r"""\s*['"]?(\d+)""", str(sets['sys.mem_limit']))
+    else:
+        m = re.search(r"""(?m)^\s*mem_limit\s*=\s*['"]?(\d+)""", open(cfg or CFG).read())
     return ('arm64' if 'arm64' in archs else 'x86_64', m.group(1) if m else '64')
+
+
+# xemu_version, xemu_commit and xemu_date (xemu-version.c) sit together in
+# the binary's strings: git describe without the v, HEAD, `date -u`.
+_VERSION = re.compile(rb'([0-9][0-9A-Za-z.+~-]{0,63})\x00+([0-9a-f]{40})\x00+'
+                      rb'([A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] [0-9:]{8} UTC [0-9]{4})\x00')
+
+
+def identity(binary, build_dir=''):
+    """What a binary is, read from its bytes (never run): {version, commit,
+    date, sha, archs, debug, pgo}. pgo is 'generate' (instrumented), else
+    'use' or 'off' from build_dir's build.ninja, else ''."""
+    data = open(binary, 'rb').read()
+    m = _VERSION.search(data)
+    pgo = 'generate' if b'__llvm_prf_cnts' in data else ''
+    ninja = os.path.join(build_dir, 'build.ninja') if build_dir else ''
+    if not pgo and ninja and os.path.isfile(ninja):
+        pgo = 'use' if b'-fprofile-use' in open(ninja, 'rb').read() else 'off'
+    archs = subprocess.run(['lipo', '-archs', binary], capture_output=True, text=True).stdout.split()
+    return {'version': m and m.group(1).decode(), 'commit': m and m.group(2).decode(),
+            'date': m and m.group(3).decode(), 'sha': hashlib.sha256(data).hexdigest()[:12],
+            'archs': archs, 'debug': b'xemu | v%s Debug' in data, 'pgo': pgo}
+
+
+def describe(i, head=''):
+    s = (f'{i["version"]} ({i["commit"][:10]}{" = HEAD" if i["commit"] == head else ""}, '
+         f'built {i["date"]})' if i['commit'] else 'no embedded version')
+    s += f', sha256 {i["sha"]}, {"+".join(i["archs"]) or "?"}, {"debug" if i["debug"] else "release"}'
+    return s + (f', pgo {i["pgo"]}' if i['pgo'] else '')
+
+
+def prepare_arms(a, arms):
+    """Refuse arms in dist/, run a bare binary in a clone of a.bundle
+    (scripts/refresh-clone.sh) inside a temp dir, print each arm's identity
+    and set a.scales (each arm's timeout scale). Returns (arms, temp dir or
+    None)."""
+    head = subprocess.run(['git', '-C', REPO, 'rev-parse', 'HEAD'], capture_output=True,
+                          text=True).stdout.strip()
+    out, tmp, a.scales, clones = [], None, {}, {}
+    arms_given = {name: app for name, app, _ in arms}
+    try:
+        for name, app, env in arms:
+            if lease.in_dist(app):
+                sys.exit(f"bench-det: {name}={app} is in dist/, the owner's bundle: pass a clone "
+                         '(cp -Rc dist/xemu.app /tmp/x.app) or the bare build/qemu-system-i386')
+            src = ''
+            if os.path.isfile(app) and os.path.abspath(app) in clones:   # a refuter beside new=
+                src = os.path.abspath(app)
+                app = clones[src]
+            elif os.path.isfile(app):
+                src, tmp = os.path.abspath(app), tmp or scratch_dir()
+                app = clones[src] = os.path.join(tmp, f'{name}.app')
+                if not os.path.isdir(os.path.join(a.bundle, 'Contents')):
+                    sys.exit(f'bench-det: {name}: a bare binary runs in a clone of --bundle, '
+                             f'and {a.bundle} is not a bundle')
+                r = subprocess.run([os.path.join(REPO, 'scripts/refresh-clone.sh'), app, src,
+                                    '--from', a.bundle], capture_output=True, text=True)
+                if r.returncode:
+                    sys.exit(f'bench-det: {name}: {(r.stderr or r.stdout).strip()}')
+            elif not os.path.isfile(os.path.join(app, 'Contents/MacOS/xemu')):
+                sys.exit(f'bench-det: {name}={app} is neither a bundle nor an xemu binary')
+            i = identity(src or os.path.join(app, 'Contents/MacOS/xemu'), os.path.dirname(src))
+            a.scales[name] = a.timeout_scale or (4 if i['debug'] or i['pgo'] == 'generate' else 1)
+            print(f'{name}: {describe(i, head)}' + (f'; from {arms_given[name]}' if src else '')
+                  + (f'; timeouts x{a.scales[name]:g}' if a.scales[name] != 1 else ''), flush=True)
+            out.append((name, app, env))
+    except BaseException:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return out, tmp
 
 
 def check(a, arms):
@@ -966,8 +1194,11 @@ def check(a, arms):
                 runs += [(t, t, f, '', a.input, None, '', a.dvd) for t in tags]
             elif name == 'd98':
                 fx = os.environ.get('AZURIK_FX', '')
-                if not fx or not os.path.isfile(os.path.join(fx, 'xemu.toml')):
-                    sys.exit('bench-det: --check d98 needs AZURIK_FX, the Modkit\'s D98 fixtures folder '
+                if not fx:
+                    print('d98: skipped (AZURIK_FX unset)', flush=True)
+                    continue
+                if not os.path.isfile(os.path.join(fx, 'xemu.toml')):
+                    sys.exit(f'bench-det: AZURIK_FX={fx} is not the Modkit\'s D98 fixtures folder '
                              '(xemu.toml, the drive, eeprom.bin, vanilla.iso)')
                 batch = batch or scratch_dir()   # the ISO clone: removed with the batch
                 iso = os.path.join(batch, 'dvd.iso')
@@ -975,10 +1206,50 @@ def check(a, arms):
                 runs += d98_runs(fx, iso)
             else:
                 sys.exit(f'bench-det: unknown --check set {name}')
+        if not runs:   # a gate that ran nothing (d98 alone without AZURIK_FX, an empty tags file)
+            sys.exit(f'bench-det: --check {a.check} ran no runs')
         check_runs(a, arms, gold, runs)
     finally:
         if batch:
             shutil.rmtree(batch, ignore_errors=True)
+
+
+def fork_slots():
+    """XEMU_FORK_SLOTS (default 4): the lease's machine-wide xemu slots."""
+    try:
+        return max(1, int(os.environ.get('XEMU_FORK_SLOTS') or 4))
+    except ValueError:
+        return 4
+
+
+def shot_diffs(rows, base):
+    """rows: (label, the first arm's result, this arm's) of the same run.
+    Prints each picture's diff against the first arm's (score_shot.diff)."""
+    rows = [(l, b, r) for l, b, r in rows if b and r and b.get('png_path') and r.get('png_path')]
+    if not rows:
+        return
+    try:
+        spec = importlib.util.spec_from_file_location('score_shot',
+                                                      os.path.join(REPO, 'scripts/score_shot.py'))
+        ss = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ss)
+    except (OSError, ImportError, SyntaxError) as e:
+        print(f'shot diff: no scripts/score_shot.py ({e})')
+        return
+    print(f'shot diff against {base} (KK bar: PSNR >= 45 dB, <= 0.01% of pixels off by > 32):')
+    for label, b, r in rows:
+        if b['png'] == r['png']:
+            print(f'  {label}: 0 px differ (the same picture)', flush=True)
+            continue
+        try:
+            x = ss.diff(b['png_path'], r['png_path'])
+        except Exception as e:   # sizes differ, or a PNG doesn't decode
+            print(f'  {label}: {e}', flush=True)
+            continue
+        psnr = 'inf' if math.isinf(x['psnr']) else f'{x["psnr"]:.1f}'
+        print(f'  {label}: {x["pixels"]} px differ, {x["off_gt_32"]} by > 32 (max {x["max_delta"]}), '
+              f'PSNR {psnr} dB, bbox {x["bbox"]}: {"within" if x["pass_kk_bar"] else "OUTSIDE"} '
+              'the KK bar', flush=True)
 
 
 def check_runs(a, arms, gold, runs):
@@ -992,7 +1263,7 @@ def check_runs(a, arms, gold, runs):
 
     width = max([12] + [len(r[0]) for r in runs])
     jobs = [(r, arm) for r in runs for arm in arms]
-    results, failed = {}, False
+    results, full, failed = {}, {}, False
 
     def stop(signum, frame):
         raise KeyboardInterrupt
@@ -1005,9 +1276,10 @@ def check_runs(a, arms, gold, runs):
         ns = argparse.Namespace(**vars(a))
         ns.tag, ns.frames, ns.hash_at, ns.input = tag, frames, hash_at, list(inp)
         ns.config, ns.dvd = cfg, dvd
-        return run_once(app, env, ns, f'bench-det --check {key} {name}', f'{name}-{key}')
+        return run_once(app, env, ns, f'bench-det --check {key} {name}', f'{name}-{key}',
+                        getattr(a, 'scales', {}).get(name))
 
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs or min(len(jobs), 3))
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs or min(len(jobs), fork_slots()))
     try:
         futs = {pool.submit(one, j): j for j in jobs}
         for fut in concurrent.futures.as_completed(futs):
@@ -1018,7 +1290,7 @@ def check_runs(a, arms, gold, runs):
                 print(f'{key:{width}s} {name:10s} FAIL  {e}', flush=True)
                 failed = True
                 continue
-            results[(key, name)] = r['ram']
+            results[(key, name)], full[(key, name)] = r['ram'], r
             want = want_of(key, table, cfg, app, env)
             got = dict(h.split('=') for h in r['ram'].split())
             if want is None:
@@ -1028,14 +1300,19 @@ def check_runs(a, arms, gold, runs):
             else:
                 verdict = 'MOVED (want ' + ' '.join(f'{s}={v}' for s, v in want.items()) + ')'
             print(f'{key:{width}s} {name:10s} {r["ram"]}  {verdict}  {r["mins"]:.3f} Mins/f'
-                  + (f'  png={r["png"]}' if r['png'] else ''), flush=True)
+                  + (f'  png={r["png"]}' if r['png'] else '')
+                  + ''.join(f'\n    {x}' for x in r['notes']), flush=True)
     except KeyboardInterrupt:
+        STOP.set()
         for p in list(LIVE):
             p.kill()
         pool.shutdown(wait=False, cancel_futures=True)
         print('bench-det: interrupted; runs killed')
         sys.exit(1)
     pool.shutdown()
+    if a.shot:
+        shot_diffs([(f'{key} {n}', full.get((key, arms[0][0])), full.get((key, n)))
+                    for (key, *_) in runs for n, _, _ in arms[1:]], arms[0][0])
     for (key, *_) in runs:
         hs = {results[(key, n)] for n, _, _ in arms if (key, n) in results}
         if len(hs) > 1:
@@ -1093,35 +1370,60 @@ def main():
     p.add_argument('--check', default='', metavar='SET[,SET]',
                    help='goldens, tags:FILE, d98 (AZURIK_FX): run in parallel and assert '
                         '(see the docstring)')
-    p.add_argument('-j', '--jobs', type=int, default=0, help='--check runs at once (default 3)')
-    p.add_argument('arms', nargs='+', help='NAME=APP[:K=V,K=V]')
+    p.add_argument('-j', '--jobs', type=int, default=0,
+                   help='--check runs at once (default XEMU_FORK_SLOTS, 4)')
+    p.add_argument('--timeout-scale', type=float, default=None, metavar='X',
+                   help='multiply the run timeouts (default 1; 4 for a debug or '
+                        'PGO-instrumented build)')
+    p.add_argument('--bundle', default=os.path.join(REPO, 'dist/xemu.app'), metavar='APP',
+                   help='the bundle a bare-binary arm runs in a clone of (default dist/xemu.app)')
+    p.add_argument('arms', nargs='+', help='NAME=APP[:K=V,TABLE.KEY=V,...]; APP may be a bare binary')
     a = p.parse_args()
     sweep_scratch()
     arms = []
     for spec in a.arms:
-        name, rest = spec.split('=', 1)
+        name, eq, rest = spec.partition('=')
+        if not name or not eq:
+            p.error(f'arm {spec!r}: want NAME=APP[:K=V,...]')
         app, _, envs = rest.partition(':')
-        kvs = re.split(r',(?=[A-Za-z_][A-Za-z0-9_]*=)', envs)   # see the docstring
+        kvs = re.split(r',(?=[A-Za-z_][A-Za-z0-9_.]*=)', envs)   # see the docstring
+        if any('=' not in kv for kv in kvs if kv):
+            p.error(f'arm {spec!r}: want K=V after the colon')
         arms.append((name, app, dict(kv.split('=', 1) for kv in kvs if kv)))
-    if a.check:
-        return check(a, arms)
-    if a.timeline:
-        a.route = a.route.split(',')
-        if a.tag == 'azurik-heavy-f1':
-            a.tag = '-'
-        return timeline(a, arms)
+    arms, tmp = prepare_arms(a, arms)
+    try:
+        if a.check:
+            return check(a, arms)
+        if a.timeline:
+            a.route = a.route.split(',')
+            if a.tag == 'azurik-heavy-f1':
+                a.tag = '-'
+            return timeline(a, arms)
+        return ab(a, arms)
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def ab(a, arms):
+    """The plain A/B: -n interleaved pairs, then each arm against the first."""
     res = {n: [] for n, _, _ in arms}
     out = open(a.out, 'a') if a.out else None
     for i in range(a.pairs):
         for name, app, env in arms:
-            r = run_once(app, env, a, f'bench-det {name} pair {i + 1}/{a.pairs} '
-                                      f'{a.tag} {a.frames if not a.hash_at else a.hash_at} frames',
-                         f'{name}-{i + 1}')
+            try:
+                r = run_once(app, env, a, f'bench-det {name} pair {i + 1}/{a.pairs} '
+                                          f'{a.tag} {a.frames if not a.hash_at else a.hash_at} frames',
+                             f'{name}-{i + 1}', a.scales.get(name))
+            except RunFailed as e:
+                print(f'{i + 1} {name}: FAIL  {e}', flush=True)
+                sys.exit(1)
             res[name].append(r)
             line = (f'{i + 1} {name}: {r["fps"]:.1f} fps  {r["mcyc"]:.3f} Mcyc/f  '
                     f'{r["mins"]:.3f} Mins/f  {r["cpu_s"]:.2f}/{r["runnable_s"]:.2f} cpu/runnable s  '
                     f'{r["ram"]}' + (f'  png={r["png"]}' if r['png'] else '')
-                    + (f'  ({r["driver"]})' if r['driver'] else ''))
+                    + (f'  ({r["driver"]})' if r['driver'] else '')
+                    + ''.join(f'\n    {x}' for x in r['notes']))
             print(line, flush=True)
             if out:
                 out.write(json.dumps({'pair': i + 1, 'arm': name, **r}) + '\n')
@@ -1140,6 +1442,9 @@ def main():
             wins = sum(1 for x, y in zip(v, b) if (x - y) * better > 0)
             print(f'  {name:10s} {statistics.mean(v):9.3f} sd {sd:.3f}  '
                   f'{gain:+.2f}% faster than {base}  wins {wins}/{len(v)}')
+    if a.shot:
+        shot_diffs([(f'{n}-{i + 1}', res[base][i], res[n][i])
+                    for i in range(a.pairs) for n, _, _ in arms[1:]], base)
     hashes = {r['ram'] for rs in res.values() for r in rs}
     if len(hashes) > 1:
         print('RAM hashes differ:', ', '.join(sorted(hashes)))
