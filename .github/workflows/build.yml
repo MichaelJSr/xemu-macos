@@ -7,6 +7,18 @@ on:
         description: Git ref (commit, branch, or tag) to build
         required: true
         type: string
+      full:
+        # Push and PR runs build every platform's release leg; tags and
+        # dispatched full runs add the debug legs and their packages.
+        description: Also build the debug legs and Windows symbol packages
+        required: false
+        type: boolean
+        default: false
+      smoke:
+        description: Run the macOS launch smoke inside the build (release.yml)
+        required: false
+        type: boolean
+        default: false
     outputs:
       pkg_version:
         description: Build version
@@ -62,6 +74,7 @@ jobs:
     uses: ./.github/workflows/build-linux.yml
     with:
       pkg_version: ${{ needs.source.outputs.pkg_version }}
+      full: ${{ inputs.full }}
 
   macos:
     name: macOS
@@ -69,6 +82,8 @@ jobs:
     uses: ./.github/workflows/build-macos.yml
     with:
       pkg_version: ${{ needs.source.outputs.pkg_version }}
+      full: ${{ inputs.full }}
+      smoke: ${{ inputs.smoke }}
 
   windows:
     name: Windows
@@ -76,8 +91,4 @@ jobs:
     uses: ./.github/workflows/build-windows.yml
     with:
       pkg_version: ${{ needs.source.outputs.pkg_version }}
-
-  test:
-    name: Unit tests
-    needs: source
-    uses: ./.github/workflows/build-tests.yml
+      full: ${{ inputs.full }}

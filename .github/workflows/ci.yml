@@ -13,9 +13,20 @@ on:
       # Dependency prereleases (kosmickrisp-asset.yml) and archive tags.
       - "kosmickrisp-*"
       - "archive/*"
+  # `gh workflow run ci.yml -f full=true --ref master` builds the tag's
+  # full matrix (debug legs, -dbg bundles, Windows symbol packages)
+  # before tagging.
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Also build the debug legs and Windows symbol packages
+        type: boolean
+        default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # The event name keeps a dispatched run and a push to the same branch
+  # apart, so neither cancels the other.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -24,6 +35,16 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       ref: ${{ github.ref }}
+      full: ${{ inputs.full == true }}
+
+  smoke:
+    # Its own job, so Roswell doesn't wait for it. It still runs when
+    # another platform is red; with no Universal bundle, its download
+    # step fails.
+    name: macOS launch
+    needs: build
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/smoke-macos.yml
 
   roswell:
     name: Roswell tests

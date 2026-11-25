@@ -7,15 +7,22 @@ on:
         description: Build version
         required: true
         type: string
+      full:
+        description: Also build the debug packages (tags, dispatched full runs)
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build:
     name: Build for Ubuntu (${{matrix.arch}}, ${{ matrix.configuration }})
     runs-on: ubuntu-22.04${{ matrix.arch == 'aarch64' && '-arm' || '' }}
+    timeout-minutes: 40
     strategy:
+      fail-fast: false
       matrix:
         arch: [x86_64, aarch64]
-        configuration: [debug, release]
+        configuration: ${{ fromJSON(inputs.full && '["debug","release"]' || '["release"]') }}
     env:
       ARTIFACT_NAME: xemu-ubuntu-${{ matrix.arch }}-${{ matrix.configuration }}
       CCACHE_DIR: /tmp/xemu-ccache
@@ -191,9 +198,11 @@ jobs:
     # refuses the RWX mapping the engine falls back to the interpreter
     # and the corpus arm's engagement assert is skipped (see
     # test-dsp-jit-diff.c). The x86_64 leg builds DSP56K_JIT_SUPPORTED=0
-    # and runs the interpreter-only arms.
+    # and runs the interpreter-only arms, then QEMU's unit suite from a
+    # second, plain (non-XBOX) configure.
     name: Test xbox suite (${{ matrix.arch }})
     runs-on: ubuntu-22.04${{ matrix.arch == 'aarch64' && '-arm' || '' }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -267,5 +276,22 @@ jobs:
         cd src/build
         ninja test-xbox
         ./pyvenv/bin/meson test --suite xbox --print-errorlogs --no-rebuild
+    - name: Run unit tests
+      # QEMU's unit suite, folded in from upstream's separate Unit tests
+      # job to reuse this job's build-dep. It needs its own plain
+      # configure, as upstream runs it: build.sh's tree defines XBOX, and
+      # under XBOX util/main-loop.c attaches the aio and io-handler
+      # sources to a private main context, so test-aio's /aio-gsource/*
+      # cases, which iterate the global default context, hang or fail.
+      # ccache stays off so this tree can't evict the suite build's
+      # entries. Runs even when the xbox suite is red, as the old job did.
+      if: ${{ !cancelled() && matrix.arch == 'x86_64' }}
+      env:
+        CCACHE_DISABLE: 1
+      run: |
+        mkdir src/build-unit
+        cd src/build-unit
+        ../configure --target-list=i386-softmmu --disable-werror
+        make -j$(nproc) check-unit
     - name: Report ccache stats
       run: ccache -s

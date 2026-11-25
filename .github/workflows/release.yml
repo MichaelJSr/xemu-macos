@@ -23,6 +23,10 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       ref: ${{ inputs.ref }}
+      full: true
+      # Inline, right after the Universal bundle, so it overlaps the
+      # Windows and Linux jobs; a failed launch fails the build.
+      smoke: true
 
   delete_prerelease:
     name: Delete pre-release
@@ -51,8 +55,8 @@ jobs:
         path: dist
         merge-multiple: true
     - name: Drop debug builds and Windows symbol packages
-      # CI still builds them (asserts, crash triage); a release carries
-      # only what players run.
+      # The tag's full matrix still builds them as run artifacts
+      # (asserts, crash triage); a release carries only what players run.
       run: rm -fv dist/*-dbg[-.]* dist/*-pdb.zip
     - name: Create release
       uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
