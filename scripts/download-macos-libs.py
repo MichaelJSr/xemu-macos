@@ -162,9 +162,14 @@ class LibInstaller:
 
 		print(f'    [*] Checking tarball...')
 
-		for fpath in tb.getnames():
-			extracted_path = os.path.abspath(os.path.join(self._extract_path, fpath))
-			assert extracted_path.startswith(self._extract_path), f'tarball has a global file: {fpath}'
+		for member in tb.getmembers():
+			extracted_path = os.path.abspath(os.path.join(self._extract_path, member.name))
+			assert extracted_path.startswith(self._extract_path), f'tarball has a global file: {member.name}'
+			# A refresh (its line removed from INSTALLED) extracts over the
+			# old build, whose files MacPorts ships read-only: replace them.
+			if not member.isdir() and os.path.lexists(extracted_path) \
+					and not os.path.isdir(extracted_path):
+				os.unlink(extracted_path)
 
 		print(f'    [*] Extracting to {self._extract_path}')
 		extract_kwargs = {'numeric_owner': True}
