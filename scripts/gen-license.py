@@ -347,6 +347,27 @@ LIBS = [
         version="R575",
         ships_static={windows},
     ),
+    # ui/thirdparty/libfatx (the Xbox hard drive explorer). Its ext.c adds
+    # OpenBSD's basename (BSD) and glibc's memrchr and dirname (LGPL-2.1+);
+    # licenses/libfatx holds all three notices.
+    Lib(
+        "libfatx",
+        "https://github.com/mborgerson/fatx",
+        gplv2,
+        license_path="licenses/libfatx",
+        ships_static=all_platforms,
+        version="fe41b2c",
+    ),
+    # ui/xui/gl-helpers.cc's and metal-helpers.mm's EASU and RCAS shaders
+    # are ported from its ffx_fsr1.h
+    Lib(
+        "AMD FidelityFX Super Resolution 1 (FSR 1)",
+        "https://github.com/GPUOpen-Effects/FidelityFX-FSR",
+        mit,
+        license_path="licenses/FidelityFX-FSR.license.txt",
+        ships_static=all_platforms,
+        version="1.0",
+    ),
     #
     # Data files included with xemu
     #
