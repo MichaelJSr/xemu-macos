@@ -43,10 +43,8 @@ static void process_pending_report(NV2AState *d, QueryReport *report)
         GLuint gl_query_result = 0;
         glGetQueryObjectuiv(report->queries[i], GL_QUERY_RESULT, &gl_query_result);
         /* The query counts pixels at the internal resolution; the guest
-         * wants them at its own, so divide by the scale factor squared. */
-        gl_query_result = (GLuint)(gl_query_result /
-                                   (pg->surface_scale_factor *
-                                    pg->surface_scale_factor) + 0.5f);
+         * wants them at its own. */
+        gl_query_result = pgraph_unscale_pixel_count(pg, gl_query_result);
         r->zpass_pixel_count_result += gl_query_result;
     }
 

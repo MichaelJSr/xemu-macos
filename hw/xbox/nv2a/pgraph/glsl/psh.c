@@ -1796,11 +1796,19 @@ void pgraph_glsl_set_psh_uniform_values(PGRAPHState *pg,
     }
 
     if (locs[PshUniform_surfaceScale] != -1) {
-        unsigned int wscale = 1, hscale = 1;
-        pgraph_apply_anti_aliasing_factor(pg, &wscale, &hscale);
-        pgraph_apply_scaling_factor(pg, &wscale, &hscale);
-        values->surfaceScale[0][0] = wscale;
-        values->surfaceScale[0][1] = hscale;
+        /* Framebuffer pixels per guest pixel, as the viewport maps them:
+         * the AA factor times the scaled binding over the guest's. Exact
+         * below 1x too, where the scale is fractional. */
+        unsigned int aw = 1, ah = 1;
+        pgraph_apply_anti_aliasing_factor(pg, &aw, &ah);
+        unsigned int bw = pg->surface_binding_dim.width;
+        unsigned int bh = pg->surface_binding_dim.height;
+        unsigned int sw = bw, sh = bh;
+        pgraph_apply_scaling_factor(pg, &sw, &sh);
+        values->surfaceScale[0][0] =
+            bw ? (float)(sw * aw) / bw : aw * pg->surface_scale_factor;
+        values->surfaceScale[0][1] =
+            bh ? (float)(sh * ah) / bh : ah * pg->surface_scale_factor;
     }
 
     unsigned int max_gl_width = pg->surface_binding_dim.width;

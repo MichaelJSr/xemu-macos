@@ -306,6 +306,11 @@ void pgraph_init(NV2AState *d)
     pg->ctx_switch_subch = -1;
     nv2a_gc_init();
 
+    /* Snap a hand-edited xemu.toml scale before a renderer reads it; the
+     * Settings UI's goes through nv2a_set_surface_scale_factor. */
+    g_config.display.quality.surface_scale =
+        pgraph_valid_surface_scale(g_config.display.quality.surface_scale);
+
     /* Force the first shader bind after init to populate uniforms. */
     pg->shader_uniform_inputs_dirty = true;
 
@@ -687,9 +692,34 @@ void nv2a_release_framebuffer_surface(void)
     qemu_mutex_unlock(&pg->renderer_lock);
 }
 
+float pgraph_valid_surface_scale(float scale)
+{
+    static const float below_1[] = { 0.25f, 0.5f, 0.75f, 1.0f };
+
+    if (!isfinite(scale)) {
+        return 1.0f;
+    }
+    if (scale >= NV2A_SURFACE_SCALE_MAX) {
+        return NV2A_SURFACE_SCALE_MAX;
+    }
+    if (scale >= 1.0f) {
+        float n = floorf(scale);
+        return scale - n > 0.5f ? n + 1.0f : n;
+    }
+    float best = below_1[0];
+    for (int i = 1; i < ARRAY_SIZE(below_1); i++) {
+        if (fabsf(below_1[i] - scale) < fabsf(best - scale)) {
+            best = below_1[i];
+        }
+    }
+    return best;
+}
+
 void nv2a_set_surface_scale_factor(float scale)
 {
     NV2AState *d = g_nv2a;
+
+    scale = pgraph_valid_surface_scale(scale);
 
     bql_unlock();
     qemu_mutex_lock(&d->pgraph.renderer_lock);

@@ -2885,8 +2885,8 @@ static void begin_draw(PGRAPHState *pg)
         pgraph_apply_anti_aliasing_factor(pg, &xmin, &ymin);
         pgraph_apply_anti_aliasing_factor(pg, &scissor_width, &scissor_height);
 
-        pgraph_apply_scaling_factor(pg, &xmin, &ymin);
-        pgraph_apply_scaling_factor(pg, &scissor_width, &scissor_height);
+        pgraph_apply_scaling_factor_rect(pg, vp_width, vp_height, &xmin, &ymin,
+                                         &scissor_width, &scissor_height);
 
         VkRect2D scissor = {
             .offset.x = xmin,
@@ -3137,8 +3137,13 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
     pgraph_apply_anti_aliasing_factor(pg, &xmin, &ymin);
     pgraph_apply_anti_aliasing_factor(pg, &scissor_width, &scissor_height);
 
-    pgraph_apply_scaling_factor(pg, &xmin, &ymin);
-    pgraph_apply_scaling_factor(pg, &scissor_width, &scissor_height);
+    /* Inside the render area (begin_render_pass), as vkCmdClearAttachments
+     * requires; a rect left empty there clears nothing. */
+    unsigned int area_width, area_height;
+    get_scaled_binding_dim(pg, &area_width, &area_height);
+    pgraph_apply_scaling_factor_rect(pg, area_width, area_height, &xmin, &ymin,
+                                     &scissor_width, &scissor_height);
+    bool rect_empty = !scissor_width || !scissor_height;
 
     VkClearRect clear_rect = {
         .rect = {
@@ -3152,7 +3157,7 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
     int num_attachments = 0;
     VkClearAttachment attachments[2];
 
-    if (write_color && r->color_binding) {
+    if (write_color && r->color_binding && !rect_empty) {
         const bool clear_all_color_channels =
             (parameter & NV097_CLEAR_SURFACE_COLOR) ==
             (NV097_CLEAR_SURFACE_R | NV097_CLEAR_SURFACE_G |
@@ -3176,7 +3181,7 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
         }
     }
 
-    if (write_zeta && r->zeta_binding) {
+    if (write_zeta && r->zeta_binding && !rect_empty) {
         int stencil_value = 0;
         float depth_value = 1.0;
         pgraph_get_clear_depth_stencil_value(pg, &depth_value, &stencil_value);

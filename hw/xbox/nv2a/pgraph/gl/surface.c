@@ -707,17 +707,101 @@ static void bind_current_surface(NV2AState *d)
     }
 }
 
+static void surface_copy_shrink_row(uint8_t *out, const uint8_t *in,
+                                    unsigned int width,
+                                    unsigned int bytes_per_pixel,
+                                    unsigned int factor)
+{
+    if (bytes_per_pixel == 4) {
+        for (unsigned int x = 0; x < width; x++) {
+            *(uint32_t *)out = *(const uint32_t *)in;
+            out += 4;
+            in += 4 * factor;
+        }
+    } else if (bytes_per_pixel == 2) {
+        for (unsigned int x = 0; x < width; x++) {
+            *(uint16_t *)out = *(const uint16_t *)in;
+            out += 2;
+            in += 2 * factor;
+        }
+    } else {
+        for (unsigned int x = 0; x < width; x++) {
+            memcpy(out, in, bytes_per_pixel);
+            out += bytes_per_pixel;
+            in += bytes_per_pixel * factor;
+        }
+    }
+}
+
+static void surface_copy_expand_row(uint8_t *out, const uint8_t *in,
+                                    unsigned int width,
+                                    unsigned int bytes_per_pixel,
+                                    unsigned int factor)
+{
+    if (bytes_per_pixel == 4) {
+        for (unsigned int x = 0; x < width; x++) {
+            for (unsigned int i = 0; i < factor; i++) {
+                *(uint32_t *)out = *(const uint32_t *)in;
+                out += bytes_per_pixel;
+            }
+            in += bytes_per_pixel;
+        }
+    } else if (bytes_per_pixel == 2) {
+        for (unsigned int x = 0; x < width; x++) {
+            for (unsigned int i = 0; i < factor; i++) {
+                *(uint16_t *)out = *(const uint16_t *)in;
+                out += bytes_per_pixel;
+            }
+            in += bytes_per_pixel;
+        }
+    } else {
+        for (unsigned int x = 0; x < width; x++) {
+            for (unsigned int i = 0; i < factor; i++) {
+                memcpy(out, in, bytes_per_pixel);
+                out += bytes_per_pixel;
+            }
+            in += bytes_per_pixel;
+        }
+    }
+}
+
 /*
  * Nearest-neighbour resample of a tightly packed `in_w` x `in_h` image
  * into `out`, whose rows are `out_pitch` bytes apart. The mapping handles
  * any ratio, so one helper covers both the integer upscale (factor > 1)
- * and the fractional downscale (factor < 1).
+ * and the fractional downscale (factor < 1). Integer ratios take strided
+ * copies, with each expanded row duplicated, and give the same pixels.
  */
 static void surface_resample(uint8_t *out, unsigned int out_pitch,
                              const uint8_t *in, unsigned int in_w,
                              unsigned int in_h, unsigned int out_w,
                              unsigned int out_h, unsigned int bytes_per_pixel)
 {
+    size_t in_pitch = (size_t)in_w * bytes_per_pixel;
+
+    if (out_w % in_w == 0 && out_h == in_h * (out_w / in_w)) {
+        unsigned int factor = out_w / in_w;
+        size_t row_bytes = (size_t)out_w * bytes_per_pixel;
+        for (unsigned int y = 0; y < in_h; y++) {
+            uint8_t *row = out + (size_t)y * factor * out_pitch;
+            surface_copy_expand_row(row, in + y * in_pitch, in_w,
+                                    bytes_per_pixel, factor);
+            for (unsigned int i = 1; i < factor; i++) {
+                memcpy(row + (size_t)i * out_pitch, row, row_bytes);
+            }
+        }
+        return;
+    }
+    if (in_w % out_w == 0 && in_h == out_h * (in_w / out_w)) {
+        unsigned int factor = in_w / out_w;
+        for (unsigned int y = 0; y < out_h; y++) {
+            surface_copy_shrink_row(out + (size_t)y * out_pitch,
+                                    in + (size_t)y * factor * in_pitch, out_w,
+                                    bytes_per_pixel, factor);
+        }
+        return;
+    }
+
     for (unsigned int y = 0; y < out_h; y++) {
         unsigned int sy = (unsigned int)((uint64_t)y * in_h / out_h);
         const uint8_t *in_row = in + (size_t)sy * in_w * bytes_per_pixel;

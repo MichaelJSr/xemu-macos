@@ -489,11 +489,6 @@ static void write_reports_from_queue(NV2AState *d, QueryReportQueue *queue,
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     int num_results_counted = 0;
-    /* The queries count pixels at the internal resolution; the guest wants
-     * them at its own, so divide by the scale factor squared. Fractional
-     * for a downscale, hence the round back to an integer. */
-    const float result_divisor =
-        pg->surface_scale_factor * pg->surface_scale_factor;
 
     QueryReport *report;
     while ((report = QSIMPLEQ_FIRST(queue)) != NULL) {
@@ -505,8 +500,10 @@ static void write_reports_from_queue(NV2AState *d, QueryReportQueue *queue,
                 query_results[num_results_counted++];
         }
 
+        /* The queries count pixels at the internal resolution; the guest
+         * wants them at its own. */
         uint32_t guest_pixels =
-            (uint32_t)(r->zpass_pixel_count_result / result_divisor + 0.5f);
+            pgraph_unscale_pixel_count(pg, r->zpass_pixel_count_result);
 
         if (report->clear) {
             NV2A_VK_DPRINTF("Cleared");

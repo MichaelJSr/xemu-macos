@@ -493,9 +493,13 @@ static inline void pgraph_apply_anti_aliasing_factor(PGRAPHState *pg,
     }
 }
 
-/* Lowest internal resolution scale the UI offers; below 1 the renderer
- * draws the guest's surfaces smaller than native (downscale). */
+/* Internal resolution scales the Settings UI offers (ui/xui/main-menu.cc):
+ * 0.25, 0.5 and 0.75 (downscale) and the integers 1 to the maximum. */
 #define NV2A_SURFACE_SCALE_MIN 0.25f
+#define NV2A_SURFACE_SCALE_MAX 10.0f
+
+/* The offered scale nearest to scale (ties go down), 1 if not finite. */
+float pgraph_valid_surface_scale(float scale);
 
 static inline void pgraph_apply_scaling_factor(PGRAPHState *pg,
                                         unsigned int *width,
@@ -516,6 +520,54 @@ static inline void pgraph_apply_scaling_factor(PGRAPHState *pg,
             *height = 1;
         }
     }
+}
+
+/*
+ * Scale a rect by its edges, so rects that share a guest edge share a
+ * scaled one, and clip it to max_w x max_h (the scaled render area). A
+ * nonzero extent that rounds to nothing inside the area keeps one pixel;
+ * one wholly outside it comes back empty.
+ */
+static inline void pgraph_apply_scaling_factor_rect(PGRAPHState *pg,
+                                                    unsigned int max_w,
+                                                    unsigned int max_h,
+                                                    unsigned int *x,
+                                                    unsigned int *y,
+                                                    unsigned int *w,
+                                                    unsigned int *h)
+{
+    float factor = pg->surface_scale_factor;
+    unsigned int x0 = MIN((unsigned int)(*x * factor + 0.5f), max_w);
+    unsigned int x1 = MIN((unsigned int)((*x + *w) * factor + 0.5f), max_w);
+    unsigned int y0 = MIN((unsigned int)(*y * factor + 0.5f), max_h);
+    unsigned int y1 = MIN((unsigned int)((*y + *h) * factor + 0.5f), max_h);
+
+    if (*w && x1 == x0 && x0 < max_w) {
+        x1 = x0 + 1;
+    }
+    if (*h && y1 == y0 && y0 < max_h) {
+        y1 = y0 + 1;
+    }
+    *x = x0;
+    *y = y0;
+    *w = x1 - x0;
+    *h = y1 - y0;
+}
+
+/*
+ * A pixel count taken at the internal resolution, at the guest's: exact
+ * integer division at an integer scale, rounded and clamped below 1x.
+ */
+static inline uint32_t pgraph_unscale_pixel_count(PGRAPHState *pg,
+                                                  uint32_t count)
+{
+    float factor = pg->surface_scale_factor;
+    if (factor >= 1.0f) {
+        unsigned int n = (unsigned int)factor;
+        return count / (n * n);
+    }
+    double v = count / ((double)factor * factor) + 0.5;
+    return v < UINT32_MAX ? (uint32_t)v : UINT32_MAX;
 }
 
 void pgraph_get_clear_color(PGRAPHState *pg, float rgba[4]);
