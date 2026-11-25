@@ -178,10 +178,98 @@ typedef struct DecodeTask {
     unsigned int width, height, depth;
     bool is_compressed;
     bool is_3d;
+    bool packed16_rgba8;
     void *decoded_data;
     size_t decoded_size;
     DecodeTaskBatch *batch;
 } DecodeTask;
+
+/* A packed 16-bit format the device can't sample natively (constants.h). */
+static bool texture_format_hosted_as_rgba8(PGRAPHVkState *r, int color_format)
+{
+    return r->color_format_vk_map[color_format].vk_format !=
+           kelvin_color_format_vk_map[color_format].vk_format;
+}
+
+static inline void unpack_packed16_texel(int color_format, uint16_t v,
+                                         uint8_t *pixel)
+{
+    switch (color_format) {
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A1R5G5B5:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A1R5G5B5:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X1R5G5B5:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X1R5G5B5: {
+        bool x1 = color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X1R5G5B5 ||
+                  color_format ==
+                      NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X1R5G5B5;
+        uint8_t r5 = (v >> 10) & 0x1F;
+        uint8_t g5 = (v >> 5) & 0x1F;
+        uint8_t b5 = v & 0x1F;
+        pixel[0] = (r5 << 3) | (r5 >> 2);
+        pixel[1] = (g5 << 3) | (g5 >> 2);
+        pixel[2] = (b5 << 3) | (b5 >> 2);
+        pixel[3] = (x1 || (v & 0x8000)) ? 0xFF : 0x00;
+        break;
+    }
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A4R4G4B4:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A4R4G4B4: {
+        uint8_t a4 = (v >> 12) & 0x0F;
+        uint8_t r4 = (v >> 8) & 0x0F;
+        uint8_t g4 = (v >> 4) & 0x0F;
+        uint8_t b4 = v & 0x0F;
+        pixel[0] = (r4 << 4) | r4;
+        pixel[1] = (g4 << 4) | g4;
+        pixel[2] = (b4 << 4) | b4;
+        pixel[3] = (a4 << 4) | a4;
+        break;
+    }
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R5G6B5:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R5G6B5: {
+        uint8_t r5 = (v >> 11) & 0x1F;
+        uint8_t g6 = (v >> 5) & 0x3F;
+        uint8_t b5 = v & 0x1F;
+        pixel[0] = (r5 << 3) | (r5 >> 2);
+        pixel[1] = (g6 << 2) | (g6 >> 4);
+        pixel[2] = (b5 << 3) | (b5 >> 2);
+        pixel[3] = 0xFF;
+        break;
+    }
+    default:
+        nv2a_vk_assert(!"not a packed 16-bit texture format");
+        break;
+    }
+}
+
+/*
+ * Packed 16-bit texels to RGBA8 for a format hosted as RGBA8; channels
+ * widen by bit replication. Volume textures convert slice by slice.
+ */
+static uint8_t *convert_packed16_to_rgba8(int color_format,
+                                          const uint8_t *data,
+                                          unsigned int width,
+                                          unsigned int height,
+                                          unsigned int depth,
+                                          unsigned int row_pitch,
+                                          unsigned int slice_pitch,
+                                          size_t *size)
+{
+    *size = (size_t)width * height * depth * 4;
+    uint8_t *converted = g_malloc(*size);
+    uint8_t *pixel = converted;
+
+    for (unsigned int z = 0; z < depth; z++) {
+        for (unsigned int y = 0; y < height; y++) {
+            const uint16_t *row =
+                (const uint16_t *)(data + (size_t)z * slice_pitch +
+                                   (size_t)y * row_pitch);
+            for (unsigned int x = 0; x < width; x++, pixel += 4) {
+                unpack_packed16_texel(color_format, row[x], pixel);
+            }
+        }
+    }
+
+    return converted;
+}
 
 static void decode_task_func(gpointer data, gpointer user_data)
 {
@@ -210,10 +298,16 @@ static void decode_task_func(gpointer data, gpointer user_data)
                           task->depth, unswizzled, pitch, slice_pitch,
                           task->fmt_info.bytes_per_pixel);
             size_t conv_size;
-            uint8_t *converted = pgraph_convert_texture_data(
-                task->shape, unswizzled, task->palette_data,
-                task->width, task->height, task->depth,
-                pitch, slice_pitch, &conv_size);
+            uint8_t *converted =
+                task->packed16_rgba8 ?
+                    convert_packed16_to_rgba8(
+                        task->shape.color_format, unswizzled, task->width,
+                        task->height, task->depth, pitch, slice_pitch,
+                        &conv_size) :
+                    pgraph_convert_texture_data(
+                        task->shape, unswizzled, task->palette_data,
+                        task->width, task->height, task->depth,
+                        pitch, slice_pitch, &conv_size);
             if (converted) {
                 g_free(unswizzled);
                 task->decoded_data = converted;
@@ -228,9 +322,15 @@ static void decode_task_func(gpointer data, gpointer user_data)
             unswizzle_rect(task->src_data, task->width, task->height,
                            unswizzled, pitch, task->fmt_info.bytes_per_pixel);
             size_t conv_size = sz;
-            uint8_t *converted = pgraph_convert_texture_data(
-                task->shape, unswizzled, task->palette_data,
-                task->width, task->height, 1, pitch, 0, &conv_size);
+            uint8_t *converted =
+                task->packed16_rgba8 ?
+                    convert_packed16_to_rgba8(task->shape.color_format,
+                                              unswizzled, task->width,
+                                              task->height, 1, pitch, 0,
+                                              &conv_size) :
+                    pgraph_convert_texture_data(
+                        task->shape, unswizzled, task->palette_data,
+                        task->width, task->height, 1, pitch, 0, &conv_size);
             if (converted) {
                 g_free(unswizzled);
                 task->decoded_data = converted;
@@ -259,24 +359,17 @@ static void decode_batch_wait(DecodeTaskBatch *batch)
     qemu_event_destroy(&batch->done);
 }
 
-static bool texture_format_needs_data_conversion(int color_format)
+static bool texture_format_needs_data_conversion(PGRAPHVkState *r,
+                                                 int color_format)
 {
     switch (color_format) {
     case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_I8_A8R8G8B8:
     case NV097_SET_TEXTURE_FORMAT_COLOR_LC_IMAGE_CR8YB8CB8YA8:
     case NV097_SET_TEXTURE_FORMAT_COLOR_LC_IMAGE_YB8CR8YA8CB8:
     case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R6G5B5:
-    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A1R5G5B5:
-    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X1R5G5B5:
-    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A4R4G4B4:
-    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R5G6B5:
-    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A1R5G5B5:
-    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X1R5G5B5:
-    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A4R4G4B4:
-    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R5G6B5:
         return true;
     default:
-        return false;
+        return texture_format_hosted_as_rgba8(r, color_format);
     }
 }
 
@@ -293,6 +386,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx,
     PGRAPHVkState *r = pg->vk_renderer_state;
     TextureShape s = pgraph_get_texture_shape(pg, texture_idx);
     BasicColorFormatInfo f = kelvin_color_format_info_map[s.color_format];
+    bool packed16_rgba8 = texture_format_hosted_as_rgba8(r, s.color_format);
 
     NV2A_VK_DGROUP_BEGIN("Texture %d: cubemap=%d, dimensionality=%d, color_format=0x%x, levels=%d, width=%d, height=%d, depth=%d border=%d, min_mipmap_level=%d, max_mipmap_level=%d, pitch=%d",
         texture_idx,
@@ -346,9 +440,14 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx,
         nv2a_vk_assert(s.pitch % f.bytes_per_pixel == 0 && "Can't handle strides unaligned to pixels");
 
         size_t converted_size;
-        uint8_t *converted = pgraph_convert_texture_data(
-            s, texture_data_ptr, palette_data_ptr, adjusted_width,
-            adjusted_height, 1, adjusted_pitch, 0, &converted_size);
+        uint8_t *converted =
+            packed16_rgba8 ?
+                convert_packed16_to_rgba8(s.color_format, texture_data_ptr,
+                                          adjusted_width, adjusted_height, 1,
+                                          adjusted_pitch, 0, &converted_size) :
+                pgraph_convert_texture_data(
+                    s, texture_data_ptr, palette_data_ptr, adjusted_width,
+                    adjusted_height, 1, adjusted_pitch, 0, &converted_size);
 
         if (!converted) {
             int dst_stride = adjusted_width * f.bytes_per_pixel;
@@ -393,7 +492,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx,
          */
         bool use_gpu_unswizzle = !is_compressed &&
             (f.bytes_per_pixel == 2 || f.bytes_per_pixel == 4) &&
-            !texture_format_needs_data_conversion(s.color_format) &&
+            !texture_format_needs_data_conversion(r, s.color_format) &&
             (adjusted_width  & (adjusted_width  - 1)) == 0 &&
             (adjusted_height & (adjusted_height - 1)) == 0;
 
@@ -468,6 +567,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx,
                 t->depth = 1;
                 t->is_compressed = is_compressed;
                 t->is_3d = false;
+                t->packed16_rgba8 = packed16_rgba8;
                 t->batch = &batch;
 
                 if (width <= 16 && height <= 16) {
@@ -549,6 +649,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx,
             t->depth = depth;
             t->is_compressed = is_compressed;
             t->is_3d = true;
+            t->packed16_rgba8 = packed16_rgba8;
             t->batch = &batch3d;
 
             if (width <= 16 && height <= 16 && depth <= 16) {
@@ -854,7 +955,7 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     TextureShape *state = &binding->key.state;
-    VkColorFormatInfo vkf = kelvin_color_format_vk_map[state->color_format];
+    VkColorFormatInfo vkf = r->color_format_vk_map[state->color_format];
 
     nv2a_profile_inc_counter(NV2A_PROF_TEX_UPLOAD);
     int64_t nsprof_t0 = nsprof_begin();
@@ -1189,7 +1290,7 @@ static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surfac
 
     PGRAPHVkState *r = pg->vk_renderer_state;
     TextureShape *state = &texture->key.state;
-    VkColorFormatInfo vkf = kelvin_color_format_vk_map[state->color_format];
+    VkColorFormatInfo vkf = r->color_format_vk_map[state->color_format];
 
     bool use_compute_to_convert_depth_stencil =
         surface->host_fmt.vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
@@ -1407,7 +1508,7 @@ static void copy_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surface,
 
     PGRAPHVkState *r = pg->vk_renderer_state;
     TextureShape *state = &texture->key.state;
-    VkColorFormatInfo vkf = kelvin_color_format_vk_map[state->color_format];
+    VkColorFormatInfo vkf = r->color_format_vk_map[state->color_format];
 
     nv2a_profile_inc_counter(NV2A_PROF_SURF_TO_TEX);
 
@@ -1479,7 +1580,8 @@ static unsigned int vk_format_texel_size(VkFormat format)
     }
 }
 
-static bool check_surface_to_texture_compatiblity(const SurfaceBinding *surface,
+static bool check_surface_to_texture_compatiblity(PGRAPHVkState *r,
+                                                  const SurfaceBinding *surface,
                                                   const TextureShape *shape)
 {
     if ((!surface->swizzle && surface->pitch != shape->pitch) ||
@@ -1490,15 +1592,45 @@ static bool check_surface_to_texture_compatiblity(const SurfaceBinding *surface,
         return false;
     }
 
+    bool tex_rgba8 = texture_format_hosted_as_rgba8(r, shape->color_format);
+
     if (!surface->color) {
-        return true;
+        /* Raw depth texels don't fit an RGBA8-hosted 16-bit texture. */
+        return !tex_rgba8;
     }
 
     if (shape->color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R6G5B5) {
         return false;
     }
 
-    VkColorFormatInfo tex_vkf = kelvin_color_format_vk_map[shape->color_format];
+    /*
+     * RGBA8-hosted 16-bit surfaces and textures hold decoded colours, not
+     * the guest bits, so a copy is right only between one guest layout.
+     */
+    bool surf_rgba8 =
+        surface->host_fmt.host_bytes_per_pixel != surface->fmt.bytes_per_pixel;
+    if (surf_rgba8 || tex_rgba8) {
+        if (!surf_rgba8 || !tex_rgba8) {
+            return false;
+        }
+        switch (surface->shape.color_format) {
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
+            return shape->color_format ==
+                       NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R5G6B5 ||
+                   shape->color_format ==
+                       NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R5G6B5;
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5:
+            return shape->color_format ==
+                       NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X1R5G5B5 ||
+                   shape->color_format ==
+                       NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X1R5G5B5;
+        default:
+            return false;
+        }
+    }
+
+    VkColorFormatInfo tex_vkf = r->color_format_vk_map[shape->color_format];
     return tex_vkf.vk_format &&
            surface->host_fmt.host_bytes_per_pixel == vk_format_texel_size(tex_vkf.vk_format);
 }
@@ -1749,7 +1881,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     SurfaceBinding *surface = pgraph_vk_surface_get(d, texture_vram_offset);
     if (surface && state.levels == 1) {
         surface_to_texture =
-            check_surface_to_texture_compatiblity(surface, &state);
+            check_surface_to_texture_compatiblity(r, surface, &state);
 
         if (!surface_to_texture && surface->color) {
             trace_nv2a_pgraph_surface_texture_compat_failed(
@@ -1785,7 +1917,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     if (!sampler_found) {
         memcpy(&sampler_entry->key, &sampler_key, sizeof(sampler_key));
 
-        VkColorFormatInfo vkf_s = kelvin_color_format_vk_map[state.color_format];
+        VkColorFormatInfo vkf_s = r->color_format_vk_map[state.color_format];
         void *sampler_next_struct = NULL;
 
         VkSamplerCustomBorderColorCreateInfoEXT custom_border_color_create_info;
@@ -2282,7 +2414,7 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
      */
     tex_dirty_buckets_insert(r, snode);
 
-    VkColorFormatInfo vkf = kelvin_color_format_vk_map[state.color_format];
+    VkColorFormatInfo vkf = r->color_format_vk_map[state.color_format];
     nv2a_vk_bounds_check(vkf.vk_format != 0);
     nv2a_vk_bounds_check(0 < state.dimensionality);
     nv2a_vk_bounds_check(state.dimensionality < ARRAY_SIZE(dimensionality_to_vk_image_type));
@@ -2620,11 +2752,12 @@ void pgraph_vk_init_textures(PGRAPHState *pg)
     sampler_cache_init(r);
     create_dummy_texture(pg);
 
+    /* r->color_format_vk_map is filled by pgraph_vk_init_surfaces. */
     r->texture_format_properties = g_malloc0_n(
-        ARRAY_SIZE(kelvin_color_format_vk_map), sizeof(VkFormatProperties));
-    for (int i = 0; i < ARRAY_SIZE(kelvin_color_format_vk_map); i++) {
+        ARRAY_SIZE(r->color_format_vk_map), sizeof(VkFormatProperties));
+    for (int i = 0; i < ARRAY_SIZE(r->color_format_vk_map); i++) {
         vkGetPhysicalDeviceFormatProperties(
-            r->physical_device, kelvin_color_format_vk_map[i].vk_format,
+            r->physical_device, r->color_format_vk_map[i].vk_format,
             &r->texture_format_properties[i]);
     }
 

@@ -511,21 +511,36 @@ static bool check_device_support_required_extensions(VkPhysicalDevice device)
     return true;
 }
 
+static bool format_has_features(VkPhysicalDevice device, VkFormat format,
+                                VkFormatFeatureFlags features)
+{
+    VkFormatProperties props;
+    vkGetPhysicalDeviceFormatProperties(device, format, &props);
+    return (props.optimalTilingFeatures & features) == features;
+}
+
 static bool check_device_support_required_formats(VkPhysicalDevice device)
 {
     const VkFormatFeatureFlags required_features =
         VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     bool all_supported = true;
 
+    /*
+     * A packed 16-bit format the device can't use natively is hosted as
+     * RGBA8 instead (constants.h): the same test as init_color_format_maps
+     * (surface.c), which makes the choice for the chosen device.
+     */
     for (int i = 0; i < ARRAY_SIZE(kelvin_color_format_vk_map); i++) {
         VkFormat format = kelvin_color_format_vk_map[i].vk_format;
         if (format == VK_FORMAT_UNDEFINED) {
             continue;
         }
-        VkFormatProperties props;
-        vkGetPhysicalDeviceFormatProperties(device, format, &props);
-        if ((props.optimalTilingFeatures & required_features) !=
-            required_features) {
+        VkFormat rgba8 = kelvin_color_format_rgba8_vk_map[i].vk_format;
+        if (rgba8 != VK_FORMAT_UNDEFINED &&
+            !format_has_features(device, format, PACKED16_TEXTURE_FEATURES)) {
+            format = rgba8;
+        }
+        if (!format_has_features(device, format, required_features)) {
             fprintf(stderr,
                     "required texture format not supported: 0x%02x "
                     "(VkFormat %d)\n",
@@ -536,6 +551,15 @@ static bool check_device_support_required_formats(VkPhysicalDevice device)
 
     for (int i = 0; i < ARRAY_SIZE(kelvin_surface_color_format_vk_map); i++) {
         const SurfaceFormatInfo *f = &kelvin_surface_color_format_vk_map[i];
+        const SurfaceFormatInfo *rgba8 =
+            &kelvin_surface_color_format_rgba8_vk_map[i];
+        if (rgba8->host_bytes_per_pixel &&
+            !(format_has_features(device, f->vk_format,
+                                  PACKED16_SURFACE_FEATURES) &&
+              pgraph_vk_is_image_format_supported(device, f->vk_format,
+                                                  f->usage))) {
+            f = rgba8;
+        }
         if (f->host_bytes_per_pixel &&
             !pgraph_vk_is_image_format_supported(device, f->vk_format,
                                                  f->usage)) {

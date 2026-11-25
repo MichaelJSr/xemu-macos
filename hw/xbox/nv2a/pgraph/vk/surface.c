@@ -240,12 +240,10 @@ static void memcpy_image(void *dst, void const *src, int dst_stride,
 }
 
 /*
- * Converted color surfaces. The guest packs these formats at two bytes
- * per pixel, but no host VkFormat for them is usable as a render target
- * on Metal (no packed 16-bit attachment), so the host image is RGBA8
- * (see kelvin_surface_color_format_vk_map, "Converted"). The
- * guest-visible bytes stay packed; the helpers below translate at the
- * upload/download boundary. Only the formats listed there reach them.
+ * Converted color surfaces: a packed 16-bit format the device can't
+ * render to natively (r->surface_color_format_vk_map, see constants.h) is
+ * hosted as RGBA8. The guest-visible bytes stay packed; the helpers below
+ * translate at the upload/download boundary.
  */
 static bool surface_host_format_converted(const SurfaceBinding *surface)
 {
@@ -254,47 +252,34 @@ static bool surface_host_format_converted(const SurfaceBinding *surface)
 }
 
 /*
- * 4x4 ordered dither matrix (Bayer). The Xbox GPU dithers color writes
- * to the destination format when NV_PGRAPH_CONTROL_0_DITHERENABLE is set;
- * the OpenGL renderer honours that with glEnable(GL_DITHER). Vulkan hosts
- * the packed 16-bit formats as RGBA8 and quantizes only here, on download,
- * so it has to reproduce the dither itself, or the result bands
- * differently from GL (and from hardware). The exact matrix is
- * implementation-defined; this is the classic 4x4 one.
+ * Round to nearest, as a native packed attachment stores what the GPU
+ * drew; a bit-replicated (uploaded) value packs back exactly.
  */
-static const uint8_t surface_dither_matrix[4][4] = {
-    {  0,  8,  2, 10 },
-    { 12,  4, 14,  6 },
-    {  3, 11,  1,  9 },
-    { 15,  7, 13,  5 },
-};
+static inline unsigned int surface_quant5(unsigned int c)
+{
+    return (c * 31 + 127) / 255;
+}
+
+static inline unsigned int surface_quant6(unsigned int c)
+{
+    return (c * 63 + 127) / 255;
+}
 
 static uint16_t surface_pack_rgba8(const SurfaceBinding *surface,
-                                   const uint8_t *pixel,
-                                   unsigned int x, unsigned int y, bool dither)
+                                   const uint8_t *pixel)
 {
     uint8_t r = pixel[0], g = pixel[1], b = pixel[2], a = pixel[3];
-
-    /*
-     * Dither offsets sit one quantization step wide, centred on
-     * round-to-nearest: 0..7 before the 5-bit >>3, 0..3 before the
-     * 6-bit >>2. With dither off d is 0 and the shift is the plain
-     * truncation the conversion always used.
-     */
-    unsigned int d = dither ? surface_dither_matrix[y & 3][x & 3] : 0;
-    unsigned int d5 = d >> 1, d6 = d >> 2;
 
     switch (surface->shape.color_format) {
     case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
     case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5:
-        /* A1R5G5B5: A[15], R[14:10], G[9:5], B[4:0]. Dither the 5-bit
-         * channels; the 1-bit alpha has no room for it. */
-        return ((a & 0x80) << 8) | (MIN(31, (r + d5) >> 3) << 10) |
-               (MIN(31, (g + d5) >> 3) << 5) | MIN(31, (b + d5) >> 3);
+        /* A1R5G5B5: A[15], R[14:10], G[9:5], B[4:0] */
+        return ((a & 0x80) << 8) | (surface_quant5(r) << 10) |
+               (surface_quant5(g) << 5) | surface_quant5(b);
     case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
         /* R5G6B5: R[15:11], G[10:5], B[4:0] */
-        return (MIN(31, (r + d5) >> 3) << 11) | (MIN(63, (g + d6) >> 2) << 5) |
-               MIN(31, (b + d5) >> 3);
+        return (surface_quant5(r) << 11) | (surface_quant6(g) << 5) |
+               surface_quant5(b);
     default:
         nv2a_vk_assert(!"unconverted surface format");
         return 0;
@@ -339,14 +324,12 @@ static void surface_unpack_rgba8(const SurfaceBinding *surface, uint8_t *pixel,
 
 /*
  * The conversion loops are the whole cost of a converted-surface upload or
- * download, and clang does not vectorize them (the per-pixel clamp becomes
- * a branchy cmov chain). Do it by hand for the two packed layouts, eight
- * pixels at a time, and fall back to the scalar helpers above for the tail
- * and for anything the SIMD path does not cover. The helpers are written
- * with SSE2 intrinsics (emmintrin.h) rather than the SSE4.1 ones the host
- * also has, so the source stays valid if the build ever tightens its
- * baseline; the compiler still picks the wider instruction where it helps
- * (the clamp comes out as PMINSD, and the narrow as PACKSSDW).
+ * download. Do them by hand for the two packed layouts, eight pixels at a
+ * time, and fall back to the scalar helpers above for the tail and for
+ * anything the SIMD path does not cover; both give the same bytes. The
+ * helpers are written with SSE2 intrinsics (emmintrin.h) rather than the
+ * SSE4.1 ones the host also has, so the source stays valid if the build
+ * ever tightens its baseline.
  */
 #ifdef __SSE2__
 static bool surface_format_simd(const SurfaceBinding *surface)
@@ -361,11 +344,26 @@ static bool surface_format_simd(const SurfaceBinding *surface)
     }
 }
 
-/* Per-lane min of non-negative 32-bit values (PMINUD is SSE4.1). */
-static inline __m128i surface_min_epi32(__m128i v, __m128i hi)
+/* Exact v / 255 for v < 65535, without a divide. */
+static inline __m128i surface_div255_epi32(__m128i v)
 {
-    __m128i gt = _mm_cmpgt_epi32(v, hi);
-    return _mm_or_si128(_mm_andnot_si128(gt, v), _mm_and_si128(gt, hi));
+    return _mm_srli_epi32(
+        _mm_add_epi32(_mm_add_epi32(v, _mm_set1_epi32(1)),
+                      _mm_srli_epi32(v, 8)),
+        8);
+}
+
+/* surface_quant5/6 per lane; PMULLD is SSE4.1, so multiply by shifts. */
+static inline __m128i surface_quant5_epi32(__m128i c)
+{
+    return surface_div255_epi32(_mm_add_epi32(
+        _mm_sub_epi32(_mm_slli_epi32(c, 5), c), _mm_set1_epi32(127)));
+}
+
+static inline __m128i surface_quant6_epi32(__m128i c)
+{
+    return surface_div255_epi32(_mm_add_epi32(
+        _mm_sub_epi32(_mm_slli_epi32(c, 6), c), _mm_set1_epi32(127)));
 }
 
 /* Narrow eight 32-bit lanes (0..65535) to sixteen 16-bit ones. PACKUSDW
@@ -380,11 +378,9 @@ static inline __m128i surface_narrow_epi32(__m128i lo, __m128i hi)
 }
 
 static inline __m128i surface_pack8_rgba8(const SurfaceBinding *surface,
-                                          __m128i vlo, __m128i vhi,
-                                          __m128i d5v, __m128i d6v)
+                                          __m128i vlo, __m128i vhi)
 {
     const __m128i maskff = _mm_set1_epi32(0xFF);
-    const __m128i sat255 = _mm_set1_epi32(255);
     __m128i rlo = _mm_and_si128(vlo, maskff);
     __m128i glo = _mm_and_si128(_mm_srli_epi32(vlo, 8), maskff);
     __m128i blo = _mm_and_si128(_mm_srli_epi32(vlo, 16), maskff);
@@ -393,37 +389,27 @@ static inline __m128i surface_pack8_rgba8(const SurfaceBinding *surface,
     __m128i bhi = _mm_and_si128(_mm_srli_epi32(vhi, 16), maskff);
     __m128i outlo, outhi;
 
-    rlo = surface_min_epi32(_mm_add_epi32(rlo, d5v), sat255);
-    blo = surface_min_epi32(_mm_add_epi32(blo, d5v), sat255);
-    rhi = surface_min_epi32(_mm_add_epi32(rhi, d5v), sat255);
-    bhi = surface_min_epi32(_mm_add_epi32(bhi, d5v), sat255);
+    blo = surface_quant5_epi32(blo);
+    bhi = surface_quant5_epi32(bhi);
 
     if (surface->shape.color_format ==
         NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5) {
-        glo = surface_min_epi32(_mm_add_epi32(glo, d6v), sat255);
-        ghi = surface_min_epi32(_mm_add_epi32(ghi, d6v), sat255);
-        rlo = _mm_slli_epi32(_mm_srli_epi32(rlo, 3), 11);
-        rhi = _mm_slli_epi32(_mm_srli_epi32(rhi, 3), 11);
-        glo = _mm_slli_epi32(_mm_srli_epi32(glo, 2), 5);
-        ghi = _mm_slli_epi32(_mm_srli_epi32(ghi, 2), 5);
-        blo = _mm_srli_epi32(blo, 3);
-        bhi = _mm_srli_epi32(bhi, 3);
+        rlo = _mm_slli_epi32(surface_quant5_epi32(rlo), 11);
+        rhi = _mm_slli_epi32(surface_quant5_epi32(rhi), 11);
+        glo = _mm_slli_epi32(surface_quant6_epi32(glo), 5);
+        ghi = _mm_slli_epi32(surface_quant6_epi32(ghi), 5);
     } else {
         /* A1R5G5B5: the 1-bit alpha is bit 7 of the source byte. */
         __m128i alo =
             _mm_and_si128(_mm_srli_epi32(vlo, 24), _mm_set1_epi32(0x80));
         __m128i ahi =
             _mm_and_si128(_mm_srli_epi32(vhi, 24), _mm_set1_epi32(0x80));
-        glo = surface_min_epi32(_mm_add_epi32(glo, d5v), sat255);
-        ghi = surface_min_epi32(_mm_add_epi32(ghi, d5v), sat255);
         alo = _mm_slli_epi32(alo, 8);
         ahi = _mm_slli_epi32(ahi, 8);
-        rlo = _mm_slli_epi32(_mm_srli_epi32(rlo, 3), 10);
-        rhi = _mm_slli_epi32(_mm_srli_epi32(rhi, 3), 10);
-        glo = _mm_slli_epi32(_mm_srli_epi32(glo, 3), 5);
-        ghi = _mm_slli_epi32(_mm_srli_epi32(ghi, 3), 5);
-        blo = _mm_srli_epi32(blo, 3);
-        bhi = _mm_srli_epi32(bhi, 3);
+        rlo = _mm_slli_epi32(surface_quant5_epi32(rlo), 10);
+        rhi = _mm_slli_epi32(surface_quant5_epi32(rhi), 10);
+        glo = _mm_slli_epi32(surface_quant5_epi32(glo), 5);
+        ghi = _mm_slli_epi32(surface_quant5_epi32(ghi), 5);
         rlo = _mm_or_si128(rlo, alo);
         rhi = _mm_or_si128(rhi, ahi);
     }
@@ -475,7 +461,7 @@ static void surface_convert_from_host_rgba8(const SurfaceBinding *surface,
                                             uint8_t *dst, int dst_stride,
                                             const uint8_t *src, int src_stride,
                                             unsigned int width,
-                                            unsigned int height, bool dither)
+                                            unsigned int height)
 {
     bool simd = false;
 #ifdef __SSE2__
@@ -490,29 +476,19 @@ static void surface_convert_from_host_rgba8(const SurfaceBinding *surface,
         if (simd) {
 #ifdef __SSE2__
             for (; x + 8 <= width; x += 8) {
-                __m128i d5v = _mm_setzero_si128();
-                __m128i d6v = _mm_setzero_si128();
-                if (dither) {
-                    const uint8_t *d = surface_dither_matrix[y & 3];
-                    d5v = _mm_setr_epi32(d[0] >> 1, d[1] >> 1, d[2] >> 1,
-                                         d[3] >> 1);
-                    d6v = _mm_setr_epi32(d[0] >> 2, d[1] >> 2, d[2] >> 2,
-                                         d[3] >> 2);
-                }
                 __m128i vlo =
                     _mm_loadu_si128((const __m128i *)(src_row + x * 4));
                 __m128i vhi =
                     _mm_loadu_si128((const __m128i *)(src_row + x * 4 + 16));
                 _mm_storeu_si128((__m128i *)(dst_row + (size_t)x * 2),
-                                 surface_pack8_rgba8(surface, vlo, vhi, d5v,
-                                                     d6v));
+                                 surface_pack8_rgba8(surface, vlo, vhi));
             }
 #endif
         }
 
         for (; x < width; x++) {
             ((uint16_t *)dst_row)[x] =
-                surface_pack_rgba8(surface, src_row + x * 4, x, y, dither);
+                surface_pack_rgba8(surface, src_row + x * 4);
         }
     }
 }
@@ -930,20 +906,11 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     }
 
     if (converted) {
-        /*
-         * Dither at the pack, where the host RGBA8 image is quantized to
-         * the guest 16-bit format, mirroring glEnable(GL_DITHER). Read the
-         * register here rather than at draw time: the download is when the
-         * quantization happens, and games set DITHERENABLE once.
-         */
-        bool dither =
-            pgraph_reg_r(&d->pgraph, NV_PGRAPH_CONTROL_0) &
-            NV_PGRAPH_CONTROL_0_DITHERENABLE;
         surface_convert_from_host_rgba8(
             surface, gl_read_buf, surface->pitch,
             r->storage_buffers[BUFFER_STAGING_DST].mapped,
             surface->width * surface->host_fmt.host_bytes_per_pixel,
-            surface->width, surface->height, dither);
+            surface->width, surface->height);
     } else {
         memcpy_image(gl_read_buf, r->storage_buffers[BUFFER_STAGING_DST].mapped,
                      surface->pitch,
@@ -1862,9 +1829,13 @@ static void expire_old_surfaces(NV2AState *d)
 static bool check_surface_compatibility(SurfaceBinding const *s1,
                                         SurfaceBinding const *s2, bool strict)
 {
+    /* The RGBA8-hosted 16-bit formats share one host format; the guest
+     * format picks the pack (surface_pack_rgba8). */
     bool format_compatible =
         (s1->color == s2->color) &&
         (s1->host_fmt.vk_format == s2->host_fmt.vk_format) &&
+        (!surface_host_format_converted(s1) ||
+         s1->shape.color_format == s2->shape.color_format) &&
         (s1->pitch == s2->pitch);
     if (!format_compatible) {
         return false;
@@ -2413,9 +2384,9 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
         dma_address = pg->dma_color;
         nv2a_vk_bounds_check(pg->surface_shape.color_format != 0);
         nv2a_vk_bounds_check(pg->surface_shape.color_format <
-               ARRAY_SIZE(kelvin_surface_color_format_vk_map));
+               ARRAY_SIZE(r->surface_color_format_vk_map));
         fmt = kelvin_surface_color_format_map[pg->surface_shape.color_format];
-        host_fmt = kelvin_surface_color_format_vk_map[pg->surface_shape.color_format];
+        host_fmt = r->surface_color_format_vk_map[pg->surface_shape.color_format];
         if (host_fmt.host_bytes_per_pixel == 0) {
             fprintf(stderr, "nv2a: unimplemented color surface format 0x%x\n",
                     pg->surface_shape.color_format);
@@ -2865,13 +2836,61 @@ static bool check_surface_internal_formats_supported(
     return all_supported;
 }
 
+/*
+ * Fill r's colour format maps: a packed 16-bit format the device can't
+ * use natively takes its RGBA8 host (constants.h). Returns how many did.
+ */
+static int init_color_format_maps(PGRAPHVkState *r)
+{
+    VkFormatProperties props;
+    int num_rgba8 = 0;
+
+    for (int i = 0; i < ARRAY_SIZE(kelvin_color_format_vk_map); i++) {
+        const VkColorFormatInfo *f = &kelvin_color_format_vk_map[i];
+        r->color_format_vk_map[i] = *f;
+        if (kelvin_color_format_rgba8_vk_map[i].vk_format ==
+            VK_FORMAT_UNDEFINED) {
+            continue;
+        }
+        vkGetPhysicalDeviceFormatProperties(r->physical_device, f->vk_format,
+                                            &props);
+        if ((props.optimalTilingFeatures & PACKED16_TEXTURE_FEATURES) !=
+            PACKED16_TEXTURE_FEATURES) {
+            r->color_format_vk_map[i] = kelvin_color_format_rgba8_vk_map[i];
+            num_rgba8++;
+        }
+    }
+
+    for (int i = 0; i < ARRAY_SIZE(kelvin_surface_color_format_vk_map); i++) {
+        const SurfaceFormatInfo *f = &kelvin_surface_color_format_vk_map[i];
+        r->surface_color_format_vk_map[i] = *f;
+        if (!kelvin_surface_color_format_rgba8_vk_map[i].host_bytes_per_pixel) {
+            continue;
+        }
+        vkGetPhysicalDeviceFormatProperties(r->physical_device, f->vk_format,
+                                            &props);
+        if ((props.optimalTilingFeatures & PACKED16_SURFACE_FEATURES) !=
+                PACKED16_SURFACE_FEATURES ||
+            !pgraph_vk_is_image_format_supported(r->physical_device,
+                                                 f->vk_format, f->usage)) {
+            r->surface_color_format_vk_map[i] =
+                kelvin_surface_color_format_rgba8_vk_map[i];
+            num_rgba8++;
+        }
+    }
+
+    return num_rgba8;
+}
+
 bool pgraph_vk_formats_supported(PGRAPHVkState *r, Error **errp)
 {
-    for (int i = 0; i < ARRAY_SIZE(kelvin_surface_color_format_vk_map); i++) {
+    init_color_format_maps(r);
+
+    for (int i = 0; i < ARRAY_SIZE(r->surface_color_format_vk_map); i++) {
         if (!check_surface_internal_formats_supported(
-                r, &kelvin_surface_color_format_vk_map[i], 1)) {
+                r, &r->surface_color_format_vk_map[i], 1)) {
             error_setg(errp, "surface color format %d (VkFormat %d) unsupported",
-                       i, kelvin_surface_color_format_vk_map[i].vk_format);
+                       i, r->surface_color_format_vk_map[i].vk_format);
             return false;
         }
     }
@@ -2883,8 +2902,8 @@ bool pgraph_vk_formats_supported(PGRAPHVkState *r, Error **errp)
         error_setg(errp, "no D16 or D24S8/D32S8 depth attachments");
         return false;
     }
-    for (int i = 0; i < ARRAY_SIZE(kelvin_color_format_vk_map); i++) {
-        VkFormat f = kelvin_color_format_vk_map[i].vk_format;
+    for (int i = 0; i < ARRAY_SIZE(r->color_format_vk_map); i++) {
+        VkFormat f = r->color_format_vk_map[i].vk_format;
         if (f != VK_FORMAT_UNDEFINED &&
             !pgraph_vk_is_image_format_supported(
                 r->physical_device, f,
@@ -2901,6 +2920,11 @@ bool pgraph_vk_formats_supported(PGRAPHVkState *r, Error **errp)
 void pgraph_vk_init_surfaces(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (init_color_format_maps(r)) {
+        fprintf(stderr, "nv2a: packed 16-bit formats without native support "
+                        "are hosted as RGBA8\n");
+    }
 
     // Check if the device supports preferred VK_FORMAT_D24_UNORM_S8_UINT
     // format, fall back to D32_SFLOAT_S8_UINT otherwise.

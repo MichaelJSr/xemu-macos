@@ -164,18 +164,18 @@ static const VkColorFormatInfo kelvin_color_format_vk_map[66] = {
         { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R }
     },
     [NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A1R5G5B5] = {
-        VK_FORMAT_R8G8B8A8_UNORM, // Converted
+        VK_FORMAT_A1R5G5B5_UNORM_PACK16,
     },
     [NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X1R5G5B5] = {
-        VK_FORMAT_R8G8B8A8_UNORM, // Converted
+        VK_FORMAT_A1R5G5B5_UNORM_PACK16,
         { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_ONE },
     },
     [NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A4R4G4B4] = {
-        VK_FORMAT_R8G8B8A8_UNORM, // Converted
+        VK_FORMAT_B4G4R4A4_UNORM_PACK16,
+        { VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_A, VK_COMPONENT_SWIZZLE_B },
     },
     [NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R5G6B5] = {
-        VK_FORMAT_R8G8B8A8_UNORM, // Converted
-        { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_ONE },
+        VK_FORMAT_R5G6B5_UNORM_PACK16,
     },
     [NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8R8G8B8] = {
         VK_FORMAT_B8G8R8A8_UNORM,
@@ -197,11 +197,10 @@ static const VkColorFormatInfo kelvin_color_format_vk_map[66] = {
         VK_FORMAT_R8G8B8A8_UNORM, // Converted
     },
     [NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A1R5G5B5] = {
-        VK_FORMAT_R8G8B8A8_UNORM, // Converted
+        VK_FORMAT_A1R5G5B5_UNORM_PACK16,
     },
     [NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R5G6B5] = {
-        VK_FORMAT_R8G8B8A8_UNORM, // Converted
-        { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_ONE },
+        VK_FORMAT_R5G6B5_UNORM_PACK16,
     },
     [NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8R8G8B8] = {
         VK_FORMAT_B8G8R8A8_UNORM,
@@ -227,11 +226,12 @@ static const VkColorFormatInfo kelvin_color_format_vk_map[66] = {
         { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R }
     },
     [NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X1R5G5B5] = {
-        VK_FORMAT_R8G8B8A8_UNORM, // Converted
+        VK_FORMAT_A1R5G5B5_UNORM_PACK16,
         { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_ONE },
     },
     [NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A4R4G4B4] = {
-        VK_FORMAT_R8G8B8A8_UNORM, // Converted
+        VK_FORMAT_B4G4R4A4_UNORM_PACK16,
+        { VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_A, VK_COMPONENT_SWIZZLE_B },
     },
     [NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X8R8G8B8] = {
         VK_FORMAT_B8G8R8A8_UNORM,
@@ -325,6 +325,51 @@ static const VkColorFormatInfo kelvin_color_format_vk_map[66] = {
     },
 };
 
+/*
+ * Hosts for the packed 16-bit formats on a device that lacks the native
+ * one (Metal on Intel/AMD Macs has none): RGBA8, converted on the CPU at
+ * upload, and for surfaces at download too. The renderer's own maps hold
+ * the choice per format (init_color_format_maps in surface.c);
+ * check_device_support_required_formats (instance.c) accepts a device on
+ * the same feature test.
+ */
+#define PACKED16_TEXTURE_FEATURES \
+    (VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT)
+#define PACKED16_SURFACE_FEATURES             \
+    (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | \
+     VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)
+
+static const VkColorFormatInfo kelvin_color_format_rgba8_vk_map[66] = {
+    [NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A1R5G5B5] = {
+        VK_FORMAT_R8G8B8A8_UNORM,
+    },
+    [NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X1R5G5B5] = {
+        VK_FORMAT_R8G8B8A8_UNORM,
+        { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_ONE },
+    },
+    [NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A4R4G4B4] = {
+        VK_FORMAT_R8G8B8A8_UNORM,
+    },
+    [NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R5G6B5] = {
+        VK_FORMAT_R8G8B8A8_UNORM,
+        { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_ONE },
+    },
+    [NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A1R5G5B5] = {
+        VK_FORMAT_R8G8B8A8_UNORM,
+    },
+    [NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R5G6B5] = {
+        VK_FORMAT_R8G8B8A8_UNORM,
+        { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_ONE },
+    },
+    [NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X1R5G5B5] = {
+        VK_FORMAT_R8G8B8A8_UNORM,
+        { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_ONE },
+    },
+    [NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A4R4G4B4] = {
+        VK_FORMAT_R8G8B8A8_UNORM,
+    },
+};
+
 typedef struct BasicSurfaceFormatInfo {
     unsigned int bytes_per_pixel;
 } BasicSurfaceFormatInfo;
@@ -353,26 +398,23 @@ static const SurfaceFormatInfo kelvin_surface_color_format_vk_map[] = {
     [NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5] =
     {
         // FIXME: Force alpha to zero
-        // Converted: no host VkFormat on Metal; hosted as RGBA8.
-        4,
-        VK_FORMAT_R8G8B8A8_UNORM,
+        2,
+        VK_FORMAT_A1R5G5B5_UNORM_PACK16,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT,
     },
     [NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5] =
     {
         // FIXME: Force alpha to one
-        // Converted: no host VkFormat on Metal; hosted as RGBA8.
-        4,
-        VK_FORMAT_R8G8B8A8_UNORM,
+        2,
+        VK_FORMAT_A1R5G5B5_UNORM_PACK16,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT,
     },
     [NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5] =
     {
-        // Converted: no host VkFormat on Metal; hosted as RGBA8.
-        4,
-        VK_FORMAT_R8G8B8A8_UNORM,
+        2,
+        VK_FORMAT_R5G6B5_UNORM_PACK16,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT,
     },
@@ -428,6 +470,33 @@ static const SurfaceFormatInfo kelvin_surface_color_format_vk_map[] = {
         // FIXME: Map channel color
         2,
         VK_FORMAT_R8G8_UNORM,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+    },
+};
+
+/* RGBA8 hosts for the packed 16-bit surfaces (see PACKED16_*_FEATURES). */
+static const SurfaceFormatInfo kelvin_surface_color_format_rgba8_vk_map
+    [sizeof(kelvin_surface_color_format_vk_map) /
+     sizeof(kelvin_surface_color_format_vk_map[0])] = {
+    [NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5] =
+    {
+        4,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+    },
+    [NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5] =
+    {
+        4,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT,
+    },
+    [NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5] =
+    {
+        4,
+        VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT,
     },

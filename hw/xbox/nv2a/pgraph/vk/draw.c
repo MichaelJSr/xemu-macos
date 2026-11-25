@@ -1491,6 +1491,20 @@ static bool check_pipeline_dirty(PGRAPHState *pg)
     return false;
 }
 
+/* A blend factor with destination alpha fixed at 1.0. */
+static VkBlendFactor blend_factor_dst_alpha_one(VkBlendFactor factor)
+{
+    switch (factor) {
+    case VK_BLEND_FACTOR_DST_ALPHA:
+        return VK_BLEND_FACTOR_ONE;
+    case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA:
+    case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE: /* min(As, 1 - Ad) */
+        return VK_BLEND_FACTOR_ZERO;
+    default:
+        return factor;
+    }
+}
+
 /*
  * The draw pipeline's raster state from BLEND, CONTROL_0-2 and SETUPRASTER
  * (RasterState in renderer.h), which create_pipeline builds its create
@@ -1581,6 +1595,25 @@ static void pgraph_vk_get_raster_state(PGRAPHState *pg, RasterState *rs)
         rs->blend_src_factor = pgraph_blend_factor_vk_map[sfactor];
         rs->blend_dst_factor = pgraph_blend_factor_vk_map[dfactor];
         rs->blend_op = pgraph_blend_equation_vk_map[equation];
+
+        /*
+         * An R5G6B5 target hosted as RGBA8 (surface.c) keeps the alpha a
+         * native one has no room for: blend with destination alpha 1.0,
+         * as the native format does. A colour binding change rebuilds
+         * the key (render_pass_state_dirty).
+         */
+        PGRAPHVkState *r = pg->vk_renderer_state;
+        const SurfaceBinding *color = r->color_binding;
+        if (color &&
+            color->shape.color_format ==
+                NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5 &&
+            color->host_fmt.host_bytes_per_pixel !=
+                color->fmt.bytes_per_pixel) {
+            rs->blend_src_factor = blend_factor_dst_alpha_one(
+                (VkBlendFactor)rs->blend_src_factor);
+            rs->blend_dst_factor = blend_factor_dst_alpha_one(
+                (VkBlendFactor)rs->blend_dst_factor);
+        }
     }
 }
 

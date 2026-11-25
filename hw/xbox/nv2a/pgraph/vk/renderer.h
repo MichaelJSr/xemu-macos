@@ -1138,6 +1138,18 @@ typedef struct PGRAPHVkState {
 
     SurfaceFormatInfo kelvin_surface_zeta_vk_map[3];
 
+    /*
+     * The texture and colour surface format maps with every packed 16-bit
+     * format this device can't use natively hosted as RGBA8 (constants.h,
+     * the *_rgba8_vk_map tables). Filled at init (surface.c).
+     */
+    VkColorFormatInfo color_format_vk_map
+        [sizeof(kelvin_color_format_vk_map) /
+         sizeof(kelvin_color_format_vk_map[0])];
+    SurfaceFormatInfo surface_color_format_vk_map
+        [sizeof(kelvin_surface_color_format_vk_map) /
+         sizeof(kelvin_surface_color_format_vk_map[0])];
+
     uint32_t clear_parameter;
 
     PGRAPHVkDisplayState display;

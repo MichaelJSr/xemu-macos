@@ -28,6 +28,8 @@
 #include "renderer.h"
 #include "ui/xemu-events.h"
 
+#include <math.h>
+
 static void perform_blit(int operation, uint8_t *source, uint8_t *dest,
                          size_t width, size_t height, size_t width_bytes,
                          size_t source_pitch, size_t dest_pitch,
@@ -196,11 +198,22 @@ void pgraph_vk_image_blit(NV2AState *d)
      * download, memmove and upload. Anything the guards reject takes the
      * CPU path below.
      *
-     * VkImageCopy cannot resample, so the fast path only covers scales at
-     * or above native (its offsets and extents are integer multiples).
-     * A fractional downscale falls through to the CPU path.
+     * VkImageCopy cannot resample, so the fast path only covers integral
+     * scales (its offsets and extents are integer multiples). Any other
+     * factor falls through to the CPU path.
+     *
+     * The surfaces must share a guest colour format: an RGBA8-hosted
+     * 16-bit surface holds decoded colours, which only a surface of the
+     * same packing may take as they are.
      */
-    if (pgraph_gpu_boost() && pg->surface_scale_factor >= 1.0f) {
+    hwaddr source_offset = image_blit->in_y * context_surfaces->source_pitch +
+                           image_blit->in_x * bytes_per_pixel;
+    hwaddr dest_offset = image_blit->out_y * context_surfaces->dest_pitch +
+                         image_blit->out_x * bytes_per_pixel;
+
+    float scale_factor = pg->surface_scale_factor;
+    if (pgraph_gpu_boost() && scale_factor >= 1.0f &&
+        scale_factor == floorf(scale_factor)) {
         SurfaceBinding *surf_src = pgraph_vk_surface_get(d, source_addr);
         SurfaceBinding *gdst = pgraph_vk_surface_get(d, dest_addr);
 
@@ -208,21 +221,26 @@ void pgraph_vk_image_blit(NV2AState *d)
             surf_src->color && gdst->color && !surf_src->swizzle &&
             !gdst->swizzle &&
             surf_src->host_fmt.vk_format == gdst->host_fmt.vk_format &&
+            surf_src->shape.color_format == gdst->shape.color_format &&
             bytes_per_pixel == surf_src->fmt.bytes_per_pixel &&
             bytes_per_pixel == gdst->fmt.bytes_per_pixel &&
             pgraph_blit_gpu_fits(d, dest_addr, bytes_per_pixel,
                                  surf_src->width, surf_src->height,
                                  surf_src->pitch, gdst->width, gdst->height,
                                  gdst->pitch)) {
-            /* Reports the blit could clobber must reach RAM first. */
-            pgraph_vk_det_reports_guard(
-                d, source_addr,
+            /* The full rectangles: gpu_fits rules out a tile clip. */
+            hwaddr gpu_src_size =
                 (image_blit->height - 1) * context_surfaces->source_pitch +
-                    image_blit->width * bytes_per_pixel);
-            pgraph_vk_det_reports_guard(
-                d, dest_addr,
+                image_blit->width * bytes_per_pixel;
+            hwaddr gpu_dst_size =
                 (image_blit->height - 1) * context_surfaces->dest_pitch +
-                    image_blit->width * bytes_per_pixel);
+                image_blit->width * bytes_per_pixel;
+
+            /* Reports the blit could clobber must reach RAM first. */
+            pgraph_vk_det_reports_guard(d, source_addr + source_offset,
+                                        gpu_src_size);
+            pgraph_vk_det_reports_guard(d, dest_addr + dest_offset,
+                                        gpu_dst_size);
 
             bool full_replace = image_blit->out_x == 0 &&
                                 image_blit->out_y == 0 &&
@@ -239,7 +257,7 @@ void pgraph_vk_image_blit(NV2AState *d)
                 }
             }
 
-            unsigned int scale = (unsigned int)pg->surface_scale_factor;
+            unsigned int scale = (unsigned int)scale_factor;
             VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
 
             pgraph_vk_transition_image_layout(
@@ -290,16 +308,13 @@ void pgraph_vk_image_blit(NV2AState *d)
             gdst->frame_time = pg->frame_time;
             gdst->draw_dirty = true;
             gdst->upload_pending = false;
+            /* Date the picture as the CPU path does (query-xemu-display). */
+            xemu_events_gpu_write(dest_addr + dest_offset, gpu_dst_size);
             return;
         }
     }
 
-    hwaddr source_offset = image_blit->in_y * context_surfaces->source_pitch +
-                           image_blit->in_x * bytes_per_pixel;
     source_addr += source_offset;
-
-    hwaddr dest_offset = image_blit->out_y * context_surfaces->dest_pitch +
-                         image_blit->out_x * bytes_per_pixel;
     dest_addr += dest_offset;
 
     size_t max_row_pixels =
