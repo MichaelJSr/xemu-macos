@@ -511,8 +511,53 @@ static void create_pvideo_image(PGRAPHState *pg, int width, int height)
                              &d->pvideo.sampler));
 }
 
+/*
+ * The overlay's staging stays in the slot's lower half: surface uploads
+ * stage at the top (pgraph_vk_upload_surface_data) while it may still be
+ * pending.
+ */
+static VkDeviceSize pvideo_staging_end(PGRAPHVkState *r)
+{
+    VkDeviceSize base = r->flight[r->current_flight].staging_buffer_base;
+    VkDeviceSize limit = r->flight[r->current_flight].staging_buffer_limit;
+
+    return base + (limit - base) / 2;
+}
+
+/*
+ * Reserve the overlay's YUV staging range in the current slot of
+ * BUFFER_STAGING_SRC, and a compute descriptor set for its conversion,
+ * finishing first when either has run out (while a movie plays through
+ * the overlay the guest may issue no draws or flips that would finish).
+ * Runs before render_display begins its command buffer: off the async
+ * compositor that is the aux command buffer, which a finish would end or
+ * try to begin again. The range is bump-allocated like texture uploads,
+ * so later uploads in the slot stage past it while the compositor
+ * command buffer, which nothing fence-waits, has yet to copy it.
+ */
+static VkDeviceSize reserve_pvideo_staging(PGRAPHState *pg,
+                                           const PvideoState *state)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    StorageBuffer *staging = &r->storage_buffers[BUFFER_STAGING_SRC];
+    VkDeviceSize size = (VkDeviceSize)state->in_width * 2 * state->in_height;
+    VkDeviceSize offset = ROUND_UP(staging->buffer_offset, 16);
+
+    if (pgraph_vk_compute_needs_finish(r) ||
+        offset + size > pvideo_staging_end(r)) {
+        /* Resets the offset to the (possibly new) current slot's base */
+        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
+        offset = ROUND_UP(staging->buffer_offset, 16);
+    }
+    nv2a_vk_bounds_check(offset + size <= pvideo_staging_end(r));
+    staging->buffer_offset = offset + size;
+
+    return offset;
+}
+
 static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
-                                VkCommandBuffer cmd)
+                                 VkDeviceSize staging_base,
+                                 VkCommandBuffer cmd)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -520,21 +565,8 @@ static void upload_pvideo_to_cmd(PGRAPHState *pg, PvideoState state,
 
     create_pvideo_image(pg, state.in_width, state.in_height);
 
-    /*
-     * The YUV conversion below takes a compute descriptor set from the
-     * current flight. Those are only recycled by a finish, and while a
-     * movie plays through the overlay the guest issues no draws or flips
-     * that would finish, so check the limit like the other compute users.
-     */
-    if (pgraph_vk_compute_needs_finish(r)) {
-        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
-    }
-
-    VkDeviceSize staging_base = r->flight[r->current_flight].staging_buffer_base;
-    if (r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset > staging_base) {
-        pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
-        r->storage_buffers[BUFFER_STAGING_SRC].buffer_offset = staging_base;
-    }
+    /* reserve_pvideo_staging ran the finish this needs */
+    nv2a_vk_assert(!pgraph_vk_compute_needs_finish(r));
 
     size_t yuv_size = (size_t)(state.in_width / 2) * state.in_height * 4;
 
@@ -1759,6 +1791,12 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
     disp->pvideo.state = get_pvideo_state(pg);
     update_uniforms(pg, surface);
 
+    /* Any finish it needs runs here, before cmd begins */
+    VkDeviceSize pvideo_staging = 0;
+    if (disp->pvideo.state.enabled) {
+        pvideo_staging = reserve_pvideo_staging(pg, &disp->pvideo.state);
+    }
+
     bool async_compositor = false;
 #if HAVE_IOSURFACE_SHARING
     async_compositor = xemu_present_is_metal() && r->present_timeline_event;
@@ -1777,8 +1815,7 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
          * when the register state is unchanged froze the overlay on its
          * first, usually black, frame.
          */
-        upload_pvideo_to_cmd(pg, disp->pvideo.state, cmd);
-        disp->pvideo.last_uploaded_state = disp->pvideo.state;
+        upload_pvideo_to_cmd(pg, disp->pvideo.state, pvideo_staging, cmd);
     }
 
     update_descriptor_set(pg, surface);
@@ -2565,7 +2602,6 @@ void pgraph_vk_render_display(PGRAPHState *pg)
 
     if (!disp->image || disp->width != width || disp->height != height) {
         create_display_image(pg, width, height);
-        disp->pvideo.last_uploaded_state = (PvideoState){ 0 };
 #if HAVE_IOSURFACE_SHARING
         metalfx_temporal_reset();
 #endif

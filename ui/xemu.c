@@ -2098,10 +2098,10 @@ static void metal_render_frame(struct xemu_console *scon)
      * `pushed` stays false and the pull path runs exactly as before.
      */
     /*
-     * Once no flip has published for a while (a movie written straight to
-     * the framebuffer or shown through the PVIDEO overlay, a loading
-     * screen), pull a fresh composite instead of re-presenting the last
-     * pushed frame. Push resumes at the next flip.
+     * While a running guest shows a movie through the PVIDEO overlay and
+     * no flip has published for 100 ms, pull a fresh composite instead of
+     * re-presenting the last pushed frame. Push resumes at the next flip;
+     * hitches, slow frames and loading screens stay on the ring.
      */
     bool pushed = !nv2a_push_present_stale() &&
                   nv2a_get_present_frame_pushed(&frame);

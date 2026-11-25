@@ -651,11 +651,28 @@ void nv2a_note_push_publish(void)
                 qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
 }
 
+/*
+ * A pull waits for the PFIFO thread's loop top, so hitches and slow frames
+ * stay on the ring: pull only while the PVIDEO overlay is on (the enabled
+ * test of get_pvideo_state in vk/display.c; the vCPU writes those
+ * registers under the BQL, and a stale read costs a frame at most). Never
+ * while paused (the overlay can't change, and a savevm holds pfifo.lock)
+ * or under icount (a pull while running renders nothing new, see
+ * keep_flip_frames, and one while paused would split the command buffer
+ * at a host-timed point).
+ */
 bool nv2a_push_present_stale(void)
 {
+    NV2AState *d = g_nv2a;
     int64_t last = qatomic_read(&push_publish_last_ns);
-    return last != 0 &&
-           qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - last > 100 * SCALE_MS;
+
+    if (last == 0 || icount_enabled() || !runstate_is_running() ||
+        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - last <= 100 * SCALE_MS) {
+        return false;
+    }
+    return (qatomic_read(&d->pvideo.regs[NV_PVIDEO_BUFFER]) &
+            NV_PVIDEO_BUFFER_0_USE) &&
+           qatomic_read(&d->pvideo.regs[NV_PVIDEO_SIZE_IN]) != 0xFFFFFFFF;
 }
 
 bool nv2a_get_present_frame_peek(NV2APresentFrame *frame)
