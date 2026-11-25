@@ -119,6 +119,7 @@ meson_options_help() {
   printf "%s\n" '  dmg             dmg image format support'
   printf "%s\n" '  docs            Documentations build support'
   printf "%s\n" '  dsound          DirectSound sound support'
+  printf "%s\n" '  dsp-llvm-jit    LLVM DSP56300 JIT backend (experimental, needs LLVM 21+)'
   printf "%s\n" '  fuse            FUSE block device export'
   printf "%s\n" '  fuse-lseek      SEEK_HOLE/SEEK_DATA support for FUSE exports'
   printf "%s\n" '  gcrypt          libgcrypt cryptography support'
@@ -317,6 +318,8 @@ _meson_option_parse() {
     --disable-docs) printf "%s" -Ddocs=disabled ;;
     --enable-dsound) printf "%s" -Ddsound=enabled ;;
     --disable-dsound) printf "%s" -Ddsound=disabled ;;
+    --enable-dsp-llvm-jit) printf "%s" -Ddsp_llvm_jit=enabled ;;
+    --disable-dsp-llvm-jit) printf "%s" -Ddsp_llvm_jit=disabled ;;
     --enable-fdt) printf "%s" -Dfdt=enabled ;;
     --disable-fdt) printf "%s" -Dfdt=disabled ;;
     --enable-fdt=*) quote_sh "-Dfdt=$2" ;;

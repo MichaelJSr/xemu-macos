@@ -29,8 +29,8 @@
 
 /*
  * Portable LLVM backend (dsp56k_jit_llvm.c). The build defines
- * DSP56K_JIT_LLVM only when libLLVM and its C API are available AND the
- * hand-written AArch64 emitter is not built (i.e. DSP56K_JIT_SUPPORTED is
+ * DSP56K_JIT_LLVM only with -Ddsp_llvm_jit=enabled, an LLVM >= 21 found,
+ * and the hand-written AArch64 emitter not built (DSP56K_JIT_SUPPORTED is
  * 0). The two backends implement the same API symbols, so exactly one of
  * them may be compiled into a given binary.
  */

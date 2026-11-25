@@ -312,6 +312,8 @@ void dsp_c_init(DSPState *dsp)
 
     dsp->dma.mem_opaque = core;
     dsp->dma.mem_read = c_dma_mem_read;
+    /* No batch hook; clear the dsp56300 engine's after an engine switch. */
+    dsp->dma.mem_read_run = NULL;
     dsp->dma.mem_write = c_dma_mem_write;
     dsp->dma.mem_span = c_dma_mem_span;
 

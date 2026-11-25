@@ -112,31 +112,21 @@ void dsp_start_frame_impl(DSPState *dsp)
 
 /*
  * Engine selection. The C interpreter engine embeds its own inline
- * basic-block JIT — the hand-written AArch64 emitter on Apple Silicon
- * (interp/dsp56k_jit_arm64.c), the portable LLVM backend elsewhere
- * (interp/dsp56k_jit_llvm.c) — for both the GP and the EP, both selected
- * by audio.dsp_jit.enabled. They differ in precedence:
+ * basic-block JIT on Apple Silicon (interp/dsp56k_jit_arm64.c,
+ * audio.dsp_jit.enabled) for both the GP and the EP; when that is
+ * supported and enabled it is this fork's preferred engine and takes
+ * precedence over the dsp56300-subproject JIT engine
+ * (audio.use_dsp_jit).
  *
- *   - On AArch64 the emitter is this fork's preferred engine: when
- *     enabled it takes precedence over the dsp56300 JIT
- *     (audio.use_dsp_jit).
- *   - The LLVM backend is Phase 1: each block wraps the interpreter, so
- *     it is *slower* than the dsp56300 JIT. It is therefore an opt-in
- *     alternative — used only when the external JIT is switched off
- *     (audio.use_dsp_jit = false) — not a default.
- *
- * DSP56K_JIT_ANY_SUPPORTED is what lets the LLVM backend reach this code
- * at all; without it the x86_64 build would silently leave the inline
- * JIT unused.
+ * The opt-in LLVM backend (interp/dsp56k_jit_llvm.c, -Ddsp_llvm_jit) takes
+ * no precedence: it wraps the interpreter and is slower than the dsp56300
+ * JIT, so it runs only in the C engine, chosen below when
+ * audio.use_dsp_jit is off, and with audio.dsp_jit.enabled set.
  */
 static bool dsp_want_external_jit_engine(void)
 {
 #if DSP56K_JIT_SUPPORTED
     if (g_config.audio.dsp_jit.enabled) {
-        return false;
-    }
-#elif DSP56K_JIT_LLVM_SUPPORTED
-    if (g_config.audio.dsp_jit.enabled && !g_config.audio.use_dsp_jit) {
         return false;
     }
 #endif

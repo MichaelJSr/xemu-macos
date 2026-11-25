@@ -40,7 +40,7 @@
  *      platforms).
  *   2. /corpus --jit — the same goldens through the inline JIT (the
  *      hand-written ARM64 emitter on aarch64 POSIX hosts, or the
- *      portable LLVM backend wherever DSP56K_JIT_LLVM is built), plus an
+ *      portable LLVM backend where -Ddsp_llvm_jit builds it), plus an
  *      assertion that the JIT actually engaged
  *      (dsp56k_jit_blocks_executed > 0).
  *   3. /corpus --jit under XEMU_DSP_JIT_DIFF=1, with and without
@@ -48,7 +48,8 @@
  *      validator replays every translated block through the interpreter
  *      (inline, or on its worker thread from a snapshot ring) and aborts
  *      on any state divergence; each program then checks the validator's
- *      accounting (dsp56k_jit_diff_counts).
+ *      accounting (dsp56k_jit_diff_counts). ARM64 emitter only: the LLVM
+ *      backend has no validator.
  *   4. /jit-differential — re-executes this binary per program on the
  *      interpreter and on the JIT (the JIT switch is latched once per
  *      process, so the arms must be separate processes) and

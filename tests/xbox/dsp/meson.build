@@ -51,24 +51,14 @@ test('xbox-mcpx-dsp-corpus-interp', diff_exe,
      protocol: 'tap',
      suite: xbox_dsp_suite)
 
-# The inline DSP56300 JIT exists on aarch64 POSIX hosts
-# (DSP56K_JIT_SUPPORTED, hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h) and,
-# through the portable LLVM backend (DSP56K_JIT_LLVM, built wherever
-# llvm-config is found — see hw/xbox/mcpx/apu/dsp/interp/meson.build), on
-# other POSIX hosts too. The JIT arms are meaningless where neither exists.
-dsp_jit_hosts = host_machine.cpu_family() == 'aarch64' and host_os != 'windows'
-if not dsp_jit_hosts and host_os != 'windows'
-  dsp_test_llvm_config = find_program(
-    'llvm-config',
-    'llvm-config-mp-22',
-    'llvm-config-22', 'llvm-config-21', 'llvm-config-20', 'llvm-config-19',
-    'llvm-config-18', 'llvm-config-17', 'llvm-config-16', 'llvm-config-15',
-    required: false,
-  )
-  dsp_jit_hosts = dsp_test_llvm_config.found()
-endif
+# The inline DSP56300 JIT: the AArch64 emitter on aarch64 POSIX hosts
+# (DSP56K_JIT_SUPPORTED, hw/xbox/mcpx/apu/dsp/interp/dsp56k_jit_arm64.h),
+# or the opt-in LLVM backend elsewhere (dsp_llvm_jit, set in
+# hw/xbox/mcpx/apu/dsp/interp/meson.build). The JIT arms are meaningless
+# where neither is built.
+dsp_arm64_jit = host_machine.cpu_family() == 'aarch64' and host_os != 'windows'
 
-if dsp_jit_hosts
+if dsp_arm64_jit or dsp_llvm_jit
   # Arm 2: same goldens through the JIT, plus a translated-blocks-
   # executed assertion so translator bail-out can't false-green it.
   test('xbox-mcpx-dsp-corpus-jit', diff_exe,
@@ -77,29 +67,33 @@ if dsp_jit_hosts
        protocol: 'tap',
        suite: xbox_dsp_suite)
 
-  # Arm 3: in-engine per-block bit-exact validator (sync mode): every
-  # translated block is replayed through the interpreter and the full
-  # dsp_core_t semantic state compared; any divergence aborts.
-  test('xbox-mcpx-dsp-jit-diff-sync', diff_exe,
-       env: environment(xbox_dsp_env + {
-         'XEMU_DSP_JIT_DIFF': '1',
-         'XEMU_DSP_JIT_DIFF_SYNC': '1',
-       }),
-       args: ['--tap', '-k', '-p', '/corpus', '--jit'],
-       protocol: 'tap',
-       suite: xbox_dsp_suite)
+  # The LLVM backend has no validator (dsp56k_jit_diff_counts reports
+  # none), so arms 3 and 3b would only repeat arm 2 there.
+  if dsp_arm64_jit
+    # Arm 3: in-engine per-block bit-exact validator (sync mode): every
+    # translated block is replayed through the interpreter and the full
+    # dsp_core_t semantic state compared; any divergence aborts.
+    test('xbox-mcpx-dsp-jit-diff-sync', diff_exe,
+         env: environment(xbox_dsp_env + {
+           'XEMU_DSP_JIT_DIFF': '1',
+           'XEMU_DSP_JIT_DIFF_SYNC': '1',
+         }),
+         args: ['--tap', '-k', '-p', '/corpus', '--jit'],
+         protocol: 'tap',
+         suite: xbox_dsp_suite)
 
-  # Arm 3b: the same validator in its default async mode: snapshots go to
-  # a ring that a worker thread replays and compares. Each program drains
-  # it and checks the counts (every snapshot checked or skipped, none
-  # failed, some checked).
-  test('xbox-mcpx-dsp-jit-diff-async', diff_exe,
-       env: environment(xbox_dsp_env + {
-         'XEMU_DSP_JIT_DIFF': '1',
-       }),
-       args: ['--tap', '-k', '-p', '/corpus', '--jit'],
-       protocol: 'tap',
-       suite: xbox_dsp_suite)
+    # Arm 3b: the same validator in its default async mode: snapshots go to
+    # a ring that a worker thread replays and compares. Each program drains
+    # it and checks the counts (every snapshot checked or skipped, none
+    # failed, some checked).
+    test('xbox-mcpx-dsp-jit-diff-async', diff_exe,
+         env: environment(xbox_dsp_env + {
+           'XEMU_DSP_JIT_DIFF': '1',
+         }),
+         args: ['--tap', '-k', '-p', '/corpus', '--jit'],
+         protocol: 'tap',
+         suite: xbox_dsp_suite)
+  endif
 
   # Arm 4: cross-process differential — runs each corpus program in an
   # interpreter child and a JIT child and byte-compares the final

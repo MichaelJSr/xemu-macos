@@ -1421,7 +1421,7 @@ static uint32_t dsp_signextend(int bits, uint32_t v) {
  * nonparallel_opcodes[] table are in scope at this file.
  * ============================================================== */
 
-#if DSP56K_JIT_ANY_SUPPORTED
+#if DSP56K_JIT_SUPPORTED
 
 void dsp56k_jit_helper_postexecute_update_pc(dsp_core_t *dsp)
 {
@@ -2014,4 +2014,4 @@ int dsp56k_jit_helper_classify_long_imm(void *fn)
     return DSP56K_JIT_LI_NONE;
 }
 
-#endif  /* DSP56K_JIT_ANY_SUPPORTED */
+#endif  /* DSP56K_JIT_SUPPORTED */

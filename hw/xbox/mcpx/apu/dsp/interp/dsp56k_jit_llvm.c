@@ -18,10 +18,10 @@
  * particular on the Intel/x86_64 hosts the AArch64 emitter leaves on the
  * interpreter.
  *
- * The build defines DSP56K_JIT_LLVM only when libLLVM is present AND the
- * AArch64 emitter is not compiled, so the two backends never define the
- * same API symbols. Outside that configuration this file compiles to
- * nothing (exactly like dsp56k_jit_arm64.c outside AArch64).
+ * The build defines DSP56K_JIT_LLVM only with -Ddsp_llvm_jit=enabled and
+ * LLVM >= 21 found, and never where the AArch64 emitter is compiled, so
+ * the two backends never define the same API symbols. Outside that
+ * configuration this file is not built.
  *
  * Phase 1 (this file): plumbing only. Each basic block is one LLVM
  * function of signature
@@ -87,11 +87,11 @@ static void parse_flags_once(void)
 
     g_jit_enabled = g_jit_config_enabled;
 
-    /* XEMU_DSP_JIT_DIFF: accepted for parity with the ARM64 backend so
-     * the tests/xbox/dsp diff arms run here too. Phase 1 has no
-     * validator (the generated code is the interpreter, so a diff would
-     * be trivially exact); dsp56k_jit_diff_counts() reports "no diff
-     * mode" and the arms skip their count assertions. */
+    /* XEMU_DSP_JIT_DIFF: accepted for parity with the ARM64 backend.
+     * Phase 1 has no validator (the generated code is the interpreter,
+     * so a diff would be trivially exact); dsp56k_jit_diff_counts()
+     * reports "no diff mode", and tests/xbox/dsp registers its diff arms
+     * for the ARM64 emitter only. */
     const char *e = getenv("XEMU_DSP_JIT_DIFF");
     if (e && e[0]) {
         long n = strtol(e, NULL, 0);
@@ -196,8 +196,11 @@ static bool jit_llvm_compile_block(DspJitLlvmState *s, uint32_t pc)
      * start = dsp->num_inst
      * limit = start + MAX(budget, 1)
      * loop: dsp56k_execute_instruction(dsp);
-     *       until dsp->num_inst >= limit || dsp->is_idle;
+     *       until (int32_t)(dsp->num_inst - limit) >= 0 || dsp->is_idle;
      * return dsp->num_inst - start;
+     *
+     * num_inst wraps: an unsigned compare misses a limit that an op's
+     * cycles step over at the wrap, and the block runs 2^32 more cycles.
      */
     LLVMPositionBuilderAtEnd(b, entry);
     LLVMValueRef off_ni = LLVMConstInt(i32ty, offsetof(dsp_core_t, num_inst), 0);
@@ -219,7 +222,10 @@ static bool jit_llvm_compile_block(DspJitLlvmState *s, uint32_t pc)
     LLVMValueRef idle_ptr =
         LLVMBuildGEP2(b, i8ty, dspv, &off_idle, 1, "idle.p");
     LLVMValueRef idle = LLVMBuildLoad2(b, i8ty, idle_ptr, "idle");
-    LLVMValueRef hit_limit = LLVMBuildICmp(b, LLVMIntUGE, ni, limit, "hit_limit");
+    LLVMValueRef past = LLVMBuildSub(b, ni, limit, "past");
+    LLVMValueRef hit_limit = LLVMBuildICmp(b, LLVMIntSGE, past,
+                                           LLVMConstInt(i32ty, 0, 0),
+                                           "hit_limit");
     LLVMValueRef is_idle =
         LLVMBuildICmp(b, LLVMIntNE, idle, LLVMConstInt(i8ty, 0, 0), "is_idle");
     LLVMValueRef stop = LLVMBuildOr(b, hit_limit, is_idle, "stop");
