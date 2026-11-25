@@ -192,6 +192,9 @@ enum NsprofEvent {
     NSPROF_EV_ASYNC_DROP,      /* finished build superseded by a sync one */
     NSPROF_EV_ASYNC_FAIL,      /* worker's build failed; key stays pending */
     NSPROF_EV_ASYNC_FALLBACK,  /* deadline passed: built synchronously */
+    NSPROF_EV_ASYNC_WARM,      /* built in line: a key built before */
+    NSPROF_EV_ASYNC_IDLE,      /* built in line: the guest isn't flipping */
+    NSPROF_EV_ASYNC_ZPASS_SYNC, /* built in line: zpass counting is on */
     NSPROF_EV__COUNT,
 };
 #define NSPROF_EV_FINISH_BASE NSPROF_EV_FINISH_VERTEX_BUFFER_DIRTY

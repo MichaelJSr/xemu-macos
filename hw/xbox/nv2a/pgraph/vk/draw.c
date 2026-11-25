@@ -678,6 +678,7 @@ void pgraph_vk_maybe_save_pipeline_cache(PGRAPHState *pg)
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     pgraph_vk_prewarm_flip(pg);
+    pgraph_vk_async_flip(r);
     if (r->pipeline_cache_unsaved == 0) {
         return;
     }
@@ -1940,12 +1941,15 @@ static bool create_pipeline(PGRAPHState *pg)
 
     /*
      * The key's first draw this session (the LRU starts empty) or after an
-     * eviction: with perf.async_pipeline_compile on (opt-in), hand the build
-     * to the async worker and skip the draw. The key draws again the frame
-     * the build lands. No worker, a failed submit or a late build falls
-     * through to the synchronous path below.
+     * eviction: with perf.async_pipeline_compile on (the default), a cold
+     * key's build goes to the async worker and the draw is skipped; the key
+     * draws again the frame the build lands. Everything else falls through
+     * to the synchronous path below (pgraph_vk_async_miss: no worker, zpass
+     * counting, the guest not flipping, a key this process has built, a
+     * failed submit or a late build).
      */
-    if (pgraph_vk_async_miss(r, snode, &key, hash, render_pass) == ASYNC_SKIP) {
+    if (pgraph_vk_async_miss(pg, snode, &key, hash, render_pass) ==
+        ASYNC_SKIP) {
         r->pipeline_binding = NULL;
         NV2A_VK_DGROUP_END();
         return false;
@@ -1981,8 +1985,9 @@ static bool create_pipeline(PGRAPHState *pg)
     VK_CHECK(pgraph_vk_build_draw_pipeline(r, &key, mods, render_pass,
                                            &feedback, &pnext, &stages,
                                            &pipeline, &layout));
+    pgraph_vk_async_stall_end(r);
     pgraph_vk_pipeline_cache_note_created(r, pnext, stages, &feedback);
-    pgraph_vk_prewarm_note_miss(r, &key);
+    pgraph_vk_prewarm_note_built(r, &key);
     nsprof_end(NSPROF_PIPELINE_GEN, nsprof_t0);
     nsprof_pipeline_created(pnext, stages, &feedback, nsprof_t0, "draw");
 

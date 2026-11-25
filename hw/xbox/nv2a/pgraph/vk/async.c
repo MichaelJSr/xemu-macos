@@ -7,19 +7,28 @@
  * lowering takes. Here that miss is handed to one worker thread and the draw
  * is skipped for the frames until the build lands, so the frame time stays
  * flat; the next draw of the key installs the finished pipeline and draws
- * normally. The LRU starts empty at every launch, so every key's first draws
- * in a session (and after an eviction) take this path, even when the driver
- * cache or the prewarm would have built the pipeline in about 1 ms.
+ * normally. The LRU starts empty at every launch, so every key's first draw
+ * in a session (and after an eviction) misses it.
  *
  * Skipping a draw is not free: a one-shot draw (a render-to-texture at a
  * level load) is lost, a repeated one leaves its surface stale until the
- * retry, and a skipped draw adds no samples to an open occlusion query. The
- * feature is therefore opt-in and bounded: Settings > "Async pipeline
- * compilation" (perf.async_pipeline_compile, off by default) turns it on,
- * a key's build is forced synchronous ASYNC_DEADLINE_NS after it was
- * submitted (a lost or starved worker costs a bounded number of frames,
- * never a hang), a failed submit falls back at once, and no worker is
- * started under icount (deterministic runs want no thread beside them).
+ * retry, and a skipped draw adds no samples to an open occlusion query. So
+ * a miss is built in line, as with the feature off, wherever a skip costs
+ * more than it saves (pgraph_vk_async_miss):
+ *  - zpass counting is on: the guest reads the count back (GET_REPORT);
+ *  - the guest isn't flipping (a load, the first frame after a load, reset
+ *    or boot): there is no picture to hitch;
+ *  - this process has built the key already (the prewarm rebuilt it, or it
+ *    was built before an eviction; vk/prewarm.c keeps that record, so only
+ *    with perf.cache_shaders on) and no other thread is compiling: a warm
+ *    creation takes about 0.3-1 ms.
+ * Only cold keys in play are skipped. The feature is on by default and
+ * bounded: Settings > General > "Async pipeline compilation"
+ * (perf.async_pipeline_compile) turns it off, a key's build is forced
+ * synchronous ASYNC_DEADLINE_NS after it was submitted (a lost or starved
+ * worker costs a bounded number of frames, never a hang), a failed submit
+ * falls back at once, and no worker is started under icount (deterministic
+ * runs want no thread beside them).
  *
  * The worker builds from the key alone, through the renderer's own builder
  * (pgraph_vk_build_draw_pipeline) and module path, so it makes exactly what
@@ -57,6 +66,9 @@
 /* A submitted key is built synchronously if the worker has not answered in
  * this long, so a lost or starved worker cannot stall a key forever */
 #define ASYNC_DEADLINE_NS (200ll * 1000000ll)
+/* No flip for this long, less the PFIFO thread's own creations: the guest
+ * isn't flipping, so misses build in line */
+#define ASYNC_IDLE_NS (250ll * 1000000ll)
 
 typedef struct AsyncJob {
     PipelineKey key;
@@ -86,12 +98,18 @@ typedef struct VkAsyncPipeline {
     QemuMutex join_lock; /* one joiner: a shutdown wait or teardown */
     bool thread_live; /* started, not joined; joiners hold join_lock */
     bool stop;
+    bool building; /* the worker is inside a build (lock) */
 
     AsyncJob jobs[ASYNC_QUEUE];
     int job_head, job_count;
 
     AsyncResult results[ASYNC_QUEUE];
     int result_head, result_count;
+
+    /* PFIFO thread only: the idle rule (pgraph_vk_async_miss) */
+    int64_t last_flip_ns;  /* 0 before the first flip: boot counts as idle */
+    int64_t own_stall_ns;  /* the PFIFO thread's own creations since then */
+    int64_t stall_t0;      /* start of the creation in progress, or 0 */
 } VkAsyncPipeline;
 
 static VkAsyncPipeline *async_live; /* for the exit backstop */
@@ -199,12 +217,14 @@ static void *async_thread(void *opaque)
         AsyncJob job = a->jobs[a->job_head];
         a->job_head = (a->job_head + 1) % ASYNC_QUEUE;
         a->job_count--;
+        a->building = true;
         qemu_mutex_unlock(&a->lock);
 
         AsyncResult res;
         async_build(a, &job, &res);
 
         qemu_mutex_lock(&a->lock);
+        a->building = false;
         if (a->result_count < ASYNC_QUEUE) {
             int idx = (a->result_head + a->result_count) % ASYNC_QUEUE;
             a->results[idx] = res;
@@ -297,32 +317,86 @@ static bool async_submit(VkAsyncPipeline *a, const PipelineKey *key,
     return ok;
 }
 
+/* PFIFO thread: whether the worker has a job queued or in hand. Only this
+ * thread submits, so an idle worker stays idle until the next submit. */
+static bool async_worker_busy(VkAsyncPipeline *a)
+{
+    qemu_mutex_lock(&a->lock);
+    bool busy = a->job_count || a->building;
+    qemu_mutex_unlock(&a->lock);
+    return busy;
+}
+
+/* The caller builds in line; pgraph_vk_async_stall_end times it from @now */
+static enum AsyncMissVerdict async_build_now(VkAsyncPipeline *a, int64_t now)
+{
+    a->stall_t0 = now;
+    return ASYNC_BUILD_NOW;
+}
+
 /*
  * A draw's first-encounter miss, on the PFIFO thread. Either hand the build
  * to the worker (and let the caller skip the draw) or say to build it here:
- * no worker is running, its queue is full, or this key's build is already
- * ASYNC_DEADLINE_NS old (a lost or starved worker must not stall the key).
+ * no worker is running, a skip would cost more than it saves (zpass
+ * counting, the guest not flipping, a warm key: see the header), the
+ * worker's queue is full, or this key's build is already ASYNC_DEADLINE_NS
+ * old (a lost or starved worker must not stall the key). A key that is
+ * still pending and builds here drops the worker's late result on install.
  */
-enum AsyncMissVerdict pgraph_vk_async_miss(PGRAPHVkState *r,
+enum AsyncMissVerdict pgraph_vk_async_miss(PGRAPHState *pg,
                                            PipelineBinding *snode,
                                            const PipelineKey *key,
                                            uint64_t hash,
                                            VkRenderPass render_pass)
 {
+    PGRAPHVkState *r = pg->vk_renderer_state;
     VkAsyncPipeline *a = r->async_compile;
     if (!a) {
         return ASYNC_BUILD_NOW;
     }
 
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    /* The open occlusion query counts this draw, and the guest reads it */
+    bool zpass = pg->zpass_pixel_count_enable;
+
+    /*
+     * The guest isn't flipping: no flip since the last flush (a load, reset
+     * or renderer switch: pgraph_vk_flush stamps pipeline_cache_loadvm_ns)
+     * or since boot, or none for ASYNC_IDLE_NS. The PFIFO thread's own
+     * shader and pipeline creations don't count toward that, or a long
+     * cold burst in play would look like a load.
+     */
+    if (r->pipeline_cache_loadvm_ns > a->last_flip_ns ||
+        now - a->last_flip_ns - a->own_stall_ns >= ASYNC_IDLE_NS) {
+        nsprof_event(NSPROF_EV_ASYNC_IDLE);
+        return async_build_now(a, now);
+    }
+
     if (snode->pending) {
-        if (now - snode->pending_since_ns < ASYNC_DEADLINE_NS) {
+        if (!zpass && now - snode->pending_since_ns < ASYNC_DEADLINE_NS) {
             nsprof_event(NSPROF_EV_ASYNC_SKIP);
             return ASYNC_SKIP;
         }
         snode->pending = false;
-        nsprof_event(NSPROF_EV_ASYNC_FALLBACK);
-        return ASYNC_BUILD_NOW;
+        nsprof_event(zpass ? NSPROF_EV_ASYNC_ZPASS_SYNC :
+                             NSPROF_EV_ASYNC_FALLBACK);
+        return async_build_now(a, now);
+    }
+
+    /*
+     * A key this process has built, while no other thread compiles: a warm
+     * creation could otherwise wait on the driver's pipeline-cache lock
+     * behind a cold one.
+     */
+    if (!async_worker_busy(a) && pgraph_vk_prewarm_key_warm(r, key)) {
+        nsprof_event(NSPROF_EV_ASYNC_WARM);
+        return async_build_now(a, now);
+    }
+
+    /* Last, so the count holds only misses zpass alone keeps in line */
+    if (zpass) {
+        nsprof_event(NSPROF_EV_ASYNC_ZPASS_SYNC);
+        return async_build_now(a, now);
     }
 
     if (async_submit(a, key, hash, render_pass)) {
@@ -333,7 +407,40 @@ enum AsyncMissVerdict pgraph_vk_async_miss(PGRAPHVkState *r,
         nsprof_event(NSPROF_EV_ASYNC_SUBMIT);
         return ASYNC_SKIP;
     }
-    return ASYNC_BUILD_NOW;
+    return async_build_now(a, now);
+}
+
+/* Every flip, drawn or skipped (pgraph_vk_maybe_save_pipeline_cache) */
+void pgraph_vk_async_flip(PGRAPHVkState *r)
+{
+    VkAsyncPipeline *a = r->async_compile;
+    if (a) {
+        a->last_flip_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        a->own_stall_ns = 0;
+    }
+}
+
+/*
+ * Around the PFIFO thread's own creations (shader_cache_entry_init, and
+ * create_pipeline's synchronous build, which pgraph_vk_async_miss starts):
+ * their time is no sign of an idle guest. Out of line and called with no
+ * branch, so the callers keep their PGO profiles.
+ */
+__attribute__((noinline)) void pgraph_vk_async_stall_begin(PGRAPHVkState *r)
+{
+    VkAsyncPipeline *a = r->async_compile;
+    if (a) {
+        a->stall_t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
+}
+
+__attribute__((noinline)) void pgraph_vk_async_stall_end(PGRAPHVkState *r)
+{
+    VkAsyncPipeline *a = r->async_compile;
+    if (a && a->stall_t0) {
+        a->own_stall_ns += qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - a->stall_t0;
+        a->stall_t0 = 0;
+    }
 }
 
 static void async_install(PGRAPHState *pg, AsyncResult *res)
@@ -369,6 +476,8 @@ static void async_install(PGRAPHState *pg, AsyncResult *res)
     pgraph_vk_pipeline_cache_note_created(
         r, res->had_feedback ? (const void *)&res->feedback.info : NULL,
         res->stages, &res->feedback);
+    /* Warm now: after an eviction it builds in line */
+    pgraph_vk_prewarm_note_built(r, &res->key);
 
     nsprof_event(NSPROF_EV_ASYNC_INSTALL);
 }

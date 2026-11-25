@@ -44,9 +44,11 @@ only, not HMP) returns once the file is written. It holds the guest's last
 flip, once the GPU has finished compositing it; while no renderer frame
 covers the scanout (after a load, before the guest draws) it holds the guest
 RAM there, at the video mode's size. With `perf.async_pipeline_compile` on,
-a normal-mode Vulkan run skips a draw whose pipeline is still compiling for
-its first use, so a picture can lack it for a frame or more; icount runs
-start no compile worker.
+a normal-mode Vulkan run skips a draw whose pipeline this launch has never
+built (and the prewarm hasn't rebuilt) while it compiles, so a picture can
+lack it for a frame or more during play; draws at boot, after a load, while
+the guest isn't flipping and while occlusion counting is on build in line.
+icount runs start no compile worker.
 
 ### Picture age
 

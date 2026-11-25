@@ -465,6 +465,8 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
 
     ShaderModuleCacheKey keys[3];
     pgraph_vk_prewarm_note_activity(r);
+    /* The async idle rule doesn't count the PFIFO thread's own compiles */
+    pgraph_vk_async_stall_begin(r);
     pgraph_vk_shader_module_keys(r, &binding->state, keys);
     binding->vsh.module_info = get_and_ref_shader_module_for_key(r, &keys[0]);
     binding->geom.module_info =
@@ -472,6 +474,7 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     binding->psh.module_info = get_and_ref_shader_module_for_key(r, &keys[2]);
 
     update_shader_uniform_locs(binding);
+    pgraph_vk_async_stall_end(r);
     nsprof_end(NSPROF_SHADER_GEN, nsprof_t0);
 }
 

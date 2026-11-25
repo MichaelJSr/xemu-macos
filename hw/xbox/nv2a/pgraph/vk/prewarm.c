@@ -10,7 +10,11 @@
  * caches on disk). When a scene then asks for one of them, the renderer's
  * own creation is a warm one, about a millisecond, instead of a compile of
  * 30-90 ms: an effect's first use (Azurik's fire armor: ~160 pipelines)
- * took seconds with empty caches, as after every update.
+ * took seconds with empty caches, as after every update. Which keys this
+ * process has built (a worker, the renderer or the async worker) is kept
+ * per key, so async compile builds those in line instead of skipping their
+ * draws (pgraph_vk_prewarm_key_warm), and a worker skips a key the renderer
+ * built first.
  *
  * The worker builds from the key alone, through the renderer's own builder
  * (pgraph_vk_build_draw_pipeline) and module path, so it makes exactly
@@ -78,6 +82,19 @@ typedef struct PrewarmRecord {
     PipelineKey key;
 } PrewarmRecord;
 
+/*
+ * known's values (the renderer's, under pgraph.lock; the workers never read
+ * it): KEY_KNOWN for a key only recorded (the manifest's at another scale or
+ * past the cap, or one handed to the async worker), KEY_BUILT once this
+ * process has built it, and KEY_LISTED + i for the workers' keys[i], whose
+ * built state is key_built[i].
+ */
+enum {
+    KEY_KNOWN = 1,
+    KEY_BUILT,
+    KEY_LISTED,
+};
+
 typedef struct VkPrewarm {
     PGRAPHVkState *r;
     char *path;              /* the manifest */
@@ -89,6 +106,7 @@ typedef struct VkPrewarm {
     /* The workers': set before they start, read-only after */
     PipelineKey *keys;
     unsigned int num_keys;
+    bool *key_built;         /* atomic: keys[i] built in this process */
     QemuThread threads[PREWARM_MAX_WORKERS];
     int num_workers;
     QemuMutex join_lock;     /* one joiner: a flip, shutdown or teardown */
@@ -101,8 +119,10 @@ typedef struct VkPrewarm {
     bool stop;
     bool done;
     int64_t activity_ns;     /* last renderer shader/pipeline creation */
+    int building;            /* workers inside a pipeline creation */
     uint32_t cache_misses;   /* worker creations that added to the cache */
     uint32_t built, failed;
+    uint32_t built_first;    /* keys the renderer built before a worker */
 } VkPrewarm;
 
 static VkPrewarm *prewarm_live;   /* for the exit backstop */
@@ -182,8 +202,11 @@ static uint64_t key_hash(const PipelineKey *key)
     return fast_hash((const uint8_t *)key, sizeof(*key));
 }
 
-/* Rewrite the manifest as @recs (oldest first): compaction */
-static void rewrite_manifest(VkPrewarm *p, GArray *recs)
+/*
+ * Rewrite the manifest as @newest_first (pointers to records, newest first;
+ * written oldest first): compaction
+ */
+static void rewrite_manifest(VkPrewarm *p, GArray *newest_first)
 {
     PrewarmHeader h;
     header_init(p->r, &h);
@@ -194,9 +217,9 @@ static void rewrite_manifest(VkPrewarm *p, GArray *recs)
         return;
     }
     bool ok = fwrite(&h, sizeof(h), 1, f) == 1;
-    if (recs->len) {
-        ok &= fwrite(recs->data, sizeof(PrewarmRecord), recs->len, f) ==
-              recs->len;
+    for (guint i = newest_first->len; ok && i-- > 0;) {
+        ok = fwrite(g_array_index(newest_first, const PrewarmRecord *, i),
+                    sizeof(PrewarmRecord), 1, f) == 1;
     }
     ok &= fclose(f) == 0;
     if (!ok || g_rename(tmp, p->path) != 0) {
@@ -226,8 +249,12 @@ static void load_manifest(VkPrewarm *p, PGRAPHState *pg)
     }
     size_t n = (len - sizeof(*h)) / sizeof(PrewarmRecord);
     const PrewarmRecord *recs = (const PrewarmRecord *)(data + sizeof(*h));
-    GArray *keep = g_array_new(FALSE, FALSE, sizeof(PrewarmRecord));
+    /* Pointers into data, newest first: appending stays linear */
+    GArray *keep = g_array_sized_new(FALSE, FALSE,
+                                     sizeof(const PrewarmRecord *),
+                                     MIN(n, PREWARM_CAP));
     p->keys = g_new(PipelineKey, MIN(n, PREWARM_CAP));
+    p->key_built = g_new0(bool, MIN(n, PREWARM_CAP));
     size_t bad = 0;
     for (size_t i = n; i-- > 0;) {
         const PrewarmRecord *rec = &recs[i];
@@ -242,15 +269,17 @@ static void load_manifest(VkPrewarm *p, PGRAPHState *pg)
         }
         uint64_t *k = g_new(uint64_t, 1);
         *k = hash;
-        g_hash_table_add(p->known, k);
+        guint tag = KEY_KNOWN;
         if (keep->len < PREWARM_CAP) {
-            g_array_prepend_val(keep, *rec);
+            g_array_append_val(keep, rec);
         }
         if (p->num_keys < PREWARM_CAP && !rec->key.clear &&
             rec->key.shader_state.vsh.surface_scale_factor ==
                 pg->surface_scale_factor) {
+            tag = KEY_LISTED + p->num_keys;
             p->keys[p->num_keys++] = rec->key;
         }
+        g_hash_table_insert(p->known, k, GUINT_TO_POINTER(tag));
     }
     if (bad || n > 2 * PREWARM_CAP || n > keep->len + keep->len / 2) {
         rewrite_manifest(p, keep);
@@ -371,6 +400,19 @@ static void *prewarm_thread(void *opaque)
         if (qatomic_read(&p->stop)) {
             break;
         }
+        /* The renderer (or the async worker) built it already */
+        if (qatomic_load_acquire(&p->key_built[i])) {
+            qatomic_inc(&p->built_first);
+            continue;
+        }
+        /*
+         * pgraph_vk_prewarm_key_warm reads it: the renderer builds no warm
+         * key in line while a cold creation here may hold the driver's
+         * pipeline-cache lock. That reader publishes activity_ns first, so
+         * only a worker between its yield and this inc can overlap a warm
+         * build, by one creation at most.
+         */
+        qatomic_inc(&p->building);
         const PipelineKey *key = &p->keys[i];
         ShaderModuleCacheKey mk[3];
         pgraph_vk_shader_module_keys(r, &key->shader_state, mk);
@@ -387,15 +429,18 @@ static void *prewarm_thread(void *opaque)
         uint32_t stages;
         VkPipeline pipeline;
         VkPipelineLayout layout;
-        if (pgraph_vk_build_draw_pipeline(r, key, vm, pass, &fb, &pnext,
-                                          &stages, &pipeline,
-                                          &layout) == VK_SUCCESS) {
+        VkResult res = pgraph_vk_build_draw_pipeline(r, key, vm, pass, &fb,
+                                                     &pnext, &stages,
+                                                     &pipeline, &layout);
+        qatomic_dec(&p->building);
+        if (res == VK_SUCCESS) {
             if (pgraph_vk_pipeline_cache_feedback_is_miss(r, pnext, stages,
                                                           &fb)) {
                 qatomic_inc(&p->cache_misses);
             }
             vkDestroyPipeline(r->device, pipeline, NULL);
             vkDestroyPipelineLayout(r->device, layout, NULL);
+            qatomic_store_release(&p->key_built[i], true);
             qatomic_inc(&p->built);
         } else if (qatomic_fetch_inc(&p->failed) + 1 >= PREWARM_MAX_FAILURES) {
             break;
@@ -428,10 +473,13 @@ static void *prewarm_thread(void *opaque)
         g_unlink(p->marker);
     }
     fprintf(stderr, "xemu: vk prewarm: %u of %u recorded pipelines rebuilt in "
-                    "%.1f s (%u new to the pipeline cache, %u failed)\n",
-            qatomic_read(&p->built), p->num_keys,
+                    "%.1f s (%u by the renderer first, %u new to the pipeline "
+                    "cache, %u failed)\n",
+            qatomic_read(&p->built) + qatomic_read(&p->built_first),
+            p->num_keys,
             (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - p->started_ns) / 1e9,
-            qatomic_read(&p->cache_misses), qatomic_read(&p->failed));
+            qatomic_read(&p->built_first), qatomic_read(&p->cache_misses),
+            qatomic_read(&p->failed));
     qatomic_store_release(&p->done, true);
     return NULL;
 }
@@ -532,22 +580,33 @@ void pgraph_vk_prewarm_note_activity(PGRAPHVkState *r)
     }
 }
 
-/* A draw pipeline built on a real miss: record its key once. */
-void pgraph_vk_prewarm_note_miss(PGRAPHVkState *r, const PipelineKey *key)
+/*
+ * A draw pipeline met on a real miss (PFIFO thread): record its key once,
+ * and once it is built (@built), mark it built in this process.
+ */
+static void note_key(VkPrewarm *p, const PipelineKey *key, bool built)
 {
-    VkPrewarm *p = r->prewarm;
-    if (!p) {
-        return;
-    }
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     qatomic_set(&p->activity_ns, now);
     uint64_t hash = key_hash(key);
-    if (g_hash_table_contains(p->known, &hash)) {
+    guint tag = GPOINTER_TO_UINT(g_hash_table_lookup(p->known, &hash));
+    if (tag >= KEY_LISTED) {
+        if (built) {
+            qatomic_store_release(&p->key_built[tag - KEY_LISTED], true);
+        }
         return;
     }
+    if (tag == KEY_BUILT || (tag == KEY_KNOWN && !built)) {
+        return;
+    }
+    /* A key already present keeps its own copy and frees this one */
     uint64_t *k = g_new(uint64_t, 1);
     *k = hash;
-    g_hash_table_add(p->known, k);
+    g_hash_table_insert(p->known, k,
+                        GUINT_TO_POINTER(built ? KEY_BUILT : KEY_KNOWN));
+    if (tag) {
+        return; /* recorded already */
+    }
 
     PrewarmRecord rec = { .key = *key };
     rec.crc = crc32c(0xffffffff, (const uint8_t *)&rec.key, sizeof(rec.key));
@@ -555,6 +614,54 @@ void pgraph_vk_prewarm_note_miss(PGRAPHVkState *r, const PipelineKey *key)
         p->oldest_pending_ns = now;
     }
     g_byte_array_append(p->pending, (const guint8 *)&rec, sizeof(rec));
+}
+
+/* A miss handed to the async worker: record its key once. */
+void pgraph_vk_prewarm_note_miss(PGRAPHVkState *r, const PipelineKey *key)
+{
+    if (r->prewarm) {
+        note_key(r->prewarm, key, false);
+    }
+}
+
+/* A draw pipeline built on a real miss (here or by the async worker). */
+void pgraph_vk_prewarm_note_built(PGRAPHVkState *r, const PipelineKey *key)
+{
+    if (r->prewarm) {
+        note_key(r->prewarm, key, true);
+    }
+}
+
+/*
+ * PFIFO thread, async compile: whether this process has built @key (a
+ * worker, the renderer or the async worker), so building it again is a warm
+ * creation of about a millisecond. Not while a worker is inside a build: a
+ * cold creation can hold the driver's pipeline-cache lock, which a warm one
+ * would wait out. A 64-bit hash collision costs one synchronous build.
+ */
+bool pgraph_vk_prewarm_key_warm(PGRAPHVkState *r, const PipelineKey *key)
+{
+    VkPrewarm *p = r->prewarm;
+    if (!p) {
+        return false;
+    }
+    uint64_t hash = key_hash(key);
+    guint tag = GPOINTER_TO_UINT(g_hash_table_lookup(p->known, &hash));
+    bool built = tag >= KEY_LISTED ?
+                 qatomic_load_acquire(&p->key_built[tag - KEY_LISTED]) :
+                 tag == KEY_BUILT;
+    if (!built) {
+        return false;
+    }
+    /*
+     * The caller builds it if no worker is building: workers waiting in
+     * worker_yield keep yielding through that build. Published before
+     * building is read, so only a worker between its yield and its
+     * qatomic_inc can start a creation beside it.
+     */
+    qatomic_set(&p->activity_ns, qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+    smp_mb();
+    return !qatomic_read(&p->building);
 }
 
 /* Each flip: append what settled, credit the worker's cache additions. */
@@ -611,6 +718,7 @@ void pgraph_vk_prewarm_finalize(PGRAPHVkState *r)
     g_byte_array_free(p->pending, TRUE);
     g_hash_table_destroy(p->known);
     g_free(p->keys);
+    g_free(p->key_built);
     g_free(p->marker);
     g_free(p->path);
     qemu_mutex_destroy(&p->join_lock);

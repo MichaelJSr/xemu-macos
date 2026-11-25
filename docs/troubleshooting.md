@@ -19,7 +19,7 @@ are in [optimizations.md](optimizations.md).
 | `display.metalfx_mode` | `spatial` or `temporal` MetalFX upscaling to the window (Vulkan renderer). Under the OpenGL presentation backend, input past the 1920 px cap (2560x1920 at `surface_scale = 4`) is skipped; the Metal backend has no cap |
 | `display.filtering` | `linear` and `nearest` are plain blits; `fsr`, `bicubic` and `lanczos` upscale, and only act when the frame is enlarged. `display.fsr_sharpness` sets FSR's RCAS sharpening, 0 (off) to 1 (maximum) |
 | `display.frame_interpolation` | MetalFX midpoints between real frames, macOS 26 (below) |
-| `perf.async_pipeline_compile` | A draw whose pipeline is new compiles on a worker thread and is skipped until it is built (built synchronously after 200 ms), so long compiles stay off the frame. MoltenVK and KosmicKrisp only; off under `-icount`; restart to apply |
+| `perf.async_pipeline_compile` | A draw whose pipeline isn't in memory compiles on a worker thread and is skipped until it is built (built synchronously after 200 ms), so long compiles stay off the frame. Built in line instead: draws an occlusion query counts, draws while the game isn't flipping frames (a load, the first frame after one), and, while no other pipeline compile runs, pipelines this launch has built before or its prewarm rebuilt (tracked only with `perf.cache_shaders` on). MoltenVK and KosmicKrisp only; off under `-icount`; restart to apply |
 | `perf.optimizations` | Keeps GPU work in VRAM: an NV09F surface blit becomes a VRAM-to-VRAM copy instead of a download and upload. Restart to apply |
 | `perf.cache_shaders` | Caches compiled shaders on disk to reduce stutter |
 
@@ -81,8 +81,9 @@ shader compiles once into a fresh `spirv_cache_v*/`. It settles; the old
 directory can be deleted.
 
 **Objects missing for a few frames the first time a scene shows.** With
-`perf.async_pipeline_compile` on, a draw with a new pipeline is skipped
-until the pipeline is built. Turn it off (restart) to compile in line.
+`perf.async_pipeline_compile` on, a draw whose pipeline isn't in memory
+can be skipped until the pipeline is built (the table above lists the
+draws that build in line). Turn it off (restart) to compile in line.
 
 **MetalFX not activating.** It needs `renderer = 'VULKAN'` and
 `metalfx_mode = 'spatial'` or `'temporal'`; see the OpenGL backend cap

@@ -471,11 +471,15 @@ perf:
   # Async pipeline compilation: a draw whose pipeline misses the in-memory
   # cache compiles on a worker thread and the draw is skipped until the
   # build lands, keeping the PFIFO thread (and the flip) off the driver's
-  # 30-90 ms SPIR-V -> MSL -> Metal lowering. The cost: a pipeline's first
-  # draws in a session can be missing for a frame or two. A key is built
-  # synchronously if the worker has not answered within 200 ms.
+  # 30-90 ms SPIR-V -> MSL -> Metal lowering. The cost: such a pipeline's
+  # first draws can be missing for a frame or two. Built in line instead:
+  # draws an occlusion query counts, draws while the guest isn't flipping
+  # (a load, the first frame after one), and, while no other pipeline
+  # compile runs, pipelines this process built before or the launch's
+  # prewarm rebuilt (tracked only with perf.cache_shaders on). A key is
+  # built synchronously if the worker has not answered within 200 ms.
   # MoltenVK/KosmicKrisp only, and off under icount. Read once at start;
-  # Settings > Performance.
+  # Settings > General.
   async_pipeline_compile:
     type: bool
     default: true

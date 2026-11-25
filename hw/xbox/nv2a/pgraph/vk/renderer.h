@@ -1470,6 +1470,8 @@ bool pgraph_vk_pipeline_cache_feedback_is_miss(PGRAPHVkState *r,
 void pgraph_vk_prewarm_init(PGRAPHState *pg);
 void pgraph_vk_prewarm_note_activity(PGRAPHVkState *r);
 void pgraph_vk_prewarm_note_miss(PGRAPHVkState *r, const PipelineKey *key);
+void pgraph_vk_prewarm_note_built(PGRAPHVkState *r, const PipelineKey *key);
+bool pgraph_vk_prewarm_key_warm(PGRAPHVkState *r, const PipelineKey *key);
 void pgraph_vk_prewarm_flip(PGRAPHState *pg);
 void pgraph_vk_prewarm_stop(PGRAPHVkState *r);
 void pgraph_vk_prewarm_shutdown_wait(PGRAPHVkState *r);
@@ -1477,14 +1479,19 @@ void pgraph_vk_prewarm_finalize(PGRAPHVkState *r);
 
 /* async.c */
 enum AsyncMissVerdict {
-    ASYNC_BUILD_NOW, /* no worker, queue full, or the build is late */
+    /* no worker, zpass counting, the guest not flipping, a warm key, a
+     * full queue or a late build */
+    ASYNC_BUILD_NOW,
     ASYNC_SKIP,      /* the build is in the worker's hands: skip the draw */
 };
 void pgraph_vk_async_init(PGRAPHState *pg);
-enum AsyncMissVerdict pgraph_vk_async_miss(PGRAPHVkState *r,
+enum AsyncMissVerdict pgraph_vk_async_miss(PGRAPHState *pg,
                                            PipelineBinding *snode,
                                            const PipelineKey *key, uint64_t hash,
                                            VkRenderPass render_pass);
+void pgraph_vk_async_flip(PGRAPHVkState *r);
+void pgraph_vk_async_stall_begin(PGRAPHVkState *r);
+void pgraph_vk_async_stall_end(PGRAPHVkState *r);
 void pgraph_vk_async_drain(PGRAPHState *pg);
 void pgraph_vk_async_stop(PGRAPHVkState *r);
 void pgraph_vk_async_shutdown_wait(PGRAPHVkState *r);

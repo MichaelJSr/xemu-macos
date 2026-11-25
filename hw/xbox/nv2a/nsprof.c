@@ -109,6 +109,9 @@ static const char *const event_names[NSPROF_EV__COUNT] = {
     [NSPROF_EV_ASYNC_DROP] = "async_drop",
     [NSPROF_EV_ASYNC_FAIL] = "async_fail",
     [NSPROF_EV_ASYNC_FALLBACK] = "async_fallback",
+    [NSPROF_EV_ASYNC_WARM] = "async_warm",
+    [NSPROF_EV_ASYNC_IDLE] = "async_idle",
+    [NSPROF_EV_ASYNC_ZPASS_SYNC] = "async_zpass_sync",
 };
 
 static struct {
