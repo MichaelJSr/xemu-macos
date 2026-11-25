@@ -47,6 +47,7 @@ compiles and static review.
 | A26 | `ui/xui/main-menu.cc` | the hard-FPU toggle shows on x86_64 and aarch64; the DSP JIT (ARM64) toggle is hidden (A10) | 2.1 |
 | A27 | `gdbstub/xemu-gdb.c` | portable; first Windows run 2026-10-18 | 3.6 |
 | A28 | `ui/xui/xbox-drive-explorer.cc`, `xbox-drive.cc`, `ui/thirdparty/libfatx` (2026-11-24) | the merged fork's only `_WIN32` branches: host files open with `_wfopen` on UTF-8 paths widened through `fs::u8path`, seek with `_fseeki64`/`_ftelli64`; `localtime_s`; libfatx formats with a fixed volume id instead of `gettimeofday` | 2.1 |
+| A29 | `hw/xbox/nv2a/pgraph/vk/draw.c` `remap_unaligned_attributes` (2026-11-24) | vertex bindings with strides that aren't a multiple of 4 are repacked on the CPU only under `__APPLE__` (Metal rejects them); Windows and Linux bind them natively as before the merge (`VTX_BINDING_STRIDE_ALIGN`) | 3.9 |
 
 ## B. Shared renderer and audio changes (active on Windows)
 

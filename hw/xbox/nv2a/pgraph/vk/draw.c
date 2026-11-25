@@ -3391,6 +3391,19 @@ typedef struct VertexBufferRemap {
     } map[NV2A_VERTEXSHADER_ATTRIBUTES];
 } VertexBufferRemap;
 
+/*
+ * Metal needs vertex binding strides that are a multiple of 4 bytes:
+ * MoltenVK fails pipeline creation with "vertex attribute binding strides
+ * must be aligned to 4 bytes", and KosmicKrisp runs on Metal too. Apple
+ * repacks such bindings and pads the packed stride to 4. Elsewhere any
+ * element-aligned stride binds directly, as upstream does.
+ */
+#ifdef __APPLE__
+#define VTX_BINDING_STRIDE_ALIGN 4
+#else
+#define VTX_BINDING_STRIDE_ALIGN 1
+#endif
+
 static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
                                                     uint32_t num_vertices)
 {
@@ -3416,15 +3429,9 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
 
         bool offset_valid =
             (r->vertex_attribute_offsets[attr_id] % element_size == 0);
-        /*
-         * Besides the element-size multiple every backend needs, Metal
-         * (MoltenVK, via VK_KHR_portability_subset) rejects a vertex
-         * binding whose stride is not a multiple of 4
-         * (VK_ERROR_INITIALIZATION_FAILED: "vertex attribute binding
-         * strides must be aligned to 4 bytes"). Repack those too.
-         */
+        /* See VTX_BINDING_STRIDE_ALIGN. */
         bool stride_valid = (desc->stride % element_size == 0) &&
-                            (desc->stride % 4 == 0);
+                            (desc->stride % VTX_BINDING_STRIDE_ALIGN == 0);
 
         if (offset_valid && stride_valid) {
             continue;
@@ -3434,9 +3441,8 @@ static VertexBufferRemap remap_unaligned_attributes(PGRAPHState *pg,
         remap.map[attr_id].offset = ROUND_UP(output_offset, element_size);
         remap.map[attr_id].old_stride = desc->stride;
         remap.map[attr_id].copy_size = element_size * element_count;
-        /* Pad the packed stride out to Metal's 4-byte requirement. */
         remap.map[attr_id].new_stride =
-            ROUND_UP(remap.map[attr_id].copy_size, 4);
+            ROUND_UP(remap.map[attr_id].copy_size, VTX_BINDING_STRIDE_ALIGN);
 
         // fprintf(stderr,
         //         "attr %02d remapped: "

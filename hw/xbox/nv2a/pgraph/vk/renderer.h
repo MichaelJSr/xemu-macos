@@ -411,7 +411,6 @@ typedef struct PGRAPHVkDisplayState {
 
     struct {
         PvideoState state;
-        PvideoState last_uploaded_state;
         int width, height;
         VkImage image;
         VkImageView image_view;

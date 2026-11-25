@@ -1978,8 +1978,9 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
      * selected it already waited out, and at its top: texture uploads
      * bump-allocate upward from the slot base and are pending only while a
      * command buffer records (none does here: the finish above ran, or the
-     * fast path requires no recording), and upload_pvideo_to_cmd stages at
-     * the slot base for a compositor command buffer that is not
+     * fast path requires no recording), and reserve_pvideo_staging
+     * bump-allocates the overlay's YUV frame below pvideo_staging_end (the
+     * slot's lower half) for a compositor command buffer that is not
      * fence-waited. This function's own aux command buffer is fence-waited
      * before it returns, so the range is free again afterwards.
      */
