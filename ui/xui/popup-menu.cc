@@ -381,19 +381,25 @@ public:
     }
 
     void PopulateGameList() {
+        namespace fs = std::filesystem;
         sorted_file_names.clear();
-        std::filesystem::path directory(g_config.general.games_dir);
+        const char *dir = g_config.general.games_dir;
+        if (!dir || !dir[0]) {
+            return;
+        }
+        // Non-throwing forms: opendir, readdir or stat can fail (an
+        // unreadable folder, a share that drops), and a throw here aborts
+        // xemu. u8path/u8string: the setting and xemu_load_disc are UTF-8.
         std::error_code ec;
-        if (std::filesystem::is_directory(directory, ec)) {
-            for (const auto &file :
-                 std::filesystem::directory_iterator(directory)) {
-                const auto &file_path = file.path();
-                if (std::filesystem::is_regular_file(file_path) &&
-                    (file_path.extension() == ".iso" ||
-                     file_path.extension() == ".xiso")) {
-                    sorted_file_names.insert(
-                        { file_path.stem().string(), file_path.string() });
-                }
+        for (fs::directory_iterator it(fs::u8path(dir), ec), end;
+             !ec && it != end; it.increment(ec)) {
+            const fs::path &p = it->path();
+            if (p.extension() != ".iso" && p.extension() != ".xiso") {
+                continue;
+            }
+            std::error_code fec;
+            if (it->is_regular_file(fec)) {
+                sorted_file_names.insert({ p.stem().u8string(), p.u8string() });
             }
         }
     }
@@ -437,8 +443,15 @@ public:
             pop = true;
         }
         if (PopupMenuButton("Save Snapshot", ICON_FA_DOWNLOAD)) {
-            xemu_snapshots_save(NULL, NULL);
-            xemu_queue_notification("Created new snapshot");
+            // Refused while a drive copy runs, among other failures
+            Error *err = NULL;
+            xemu_snapshots_save(NULL, &err);
+            if (err) {
+                xemu_queue_error_message(error_get_pretty(err));
+                error_free(err);
+            } else {
+                xemu_queue_notification("Created new snapshot");
+            }
             pop = true;
         }
         if (PopupMenuSubmenuButton("Games", ICON_FA_GAMEPAD)) {

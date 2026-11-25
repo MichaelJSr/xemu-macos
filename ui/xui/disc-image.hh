@@ -3,8 +3,7 @@
 //
 // Reads a game's default.xbe out of an Xbox disc image (XISO, or a
 // Redump-style full disc dump) and the title information in its header.
-// The game patch tool uses it to find the file a patch is applied to; the
-// write side of the same format lives in xiso.cc.
+// The game patch tool uses it to find the file a patch is applied to.
 //
 // Pure C++17 with no emulator dependencies.
 //

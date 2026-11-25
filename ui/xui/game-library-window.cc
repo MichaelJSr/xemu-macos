@@ -282,43 +282,53 @@ void DrawWindow()
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
-        int shown = 0;
-        for (const LibraryGame &g : games) {
-            if (!Matches(g)) {
-                continue;
+        // Lay out only the rows in view: this runs under the BQL every
+        // frame the window is open, and libraries run to hundreds of images
+        static std::vector<int> rows; // reused each frame, UI thread only
+        rows.clear();
+        for (int i = 0; i < (int)games.size(); i++) {
+            if (Matches(games[i])) {
+                rows.push_back(i);
             }
-            shown++;
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
+        }
+        const int shown = (int)rows.size();
+        ImGuiListClipper clipper;
+        clipper.Begin(shown);
+        while (clipper.Step()) {
+            for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; r++) {
+                const LibraryGame &g = games[rows[r]];
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
 
-            ImGui::PushID(g.path.c_str());
-            if (!g.valid) {
-                ImGui::PushStyleColor(ImGuiCol_Text,
-                                      ImVec4(0.65f, 0.65f, 0.65f, 1.0f));
-            }
-            if (ImGui::Selectable(g.title.c_str(), g_selected == g.path,
-                                  ImGuiSelectableFlags_SpanAllColumns)) {
-                g_selected = g.path;
-            }
-            if (!g.valid) {
-                ImGui::PopStyleColor();
-            }
-            if (!g.valid && !g.error.empty() && ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", g.error.c_str());
-            }
-            if (ImGui::IsItemHovered() &&
-                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                g_selected = g.path;
-                LoadGame(g);
-            }
-            ImGui::PopID();
+                ImGui::PushID(g.path.c_str());
+                if (!g.valid) {
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                                          ImVec4(0.65f, 0.65f, 0.65f, 1.0f));
+                }
+                if (ImGui::Selectable(g.title.c_str(), g_selected == g.path,
+                                      ImGuiSelectableFlags_SpanAllColumns)) {
+                    g_selected = g.path;
+                }
+                if (!g.valid) {
+                    ImGui::PopStyleColor();
+                }
+                if (!g.valid && !g.error.empty() && ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", g.error.c_str());
+                }
+                if (ImGui::IsItemHovered() &&
+                    ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    g_selected = g.path;
+                    LoadGame(g);
+                }
+                ImGui::PopID();
 
-            ImGui::TableSetColumnIndex(1);
-            ImGui::TextUnformatted(g.title_id.c_str());
-            ImGui::TableSetColumnIndex(2);
-            ImGui::TextUnformatted(g.region.c_str());
-            ImGui::TableSetColumnIndex(3);
-            ImGui::TextUnformatted(HumanSize(g.size).c_str());
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextUnformatted(g.title_id.c_str());
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextUnformatted(g.region.c_str());
+                ImGui::TableSetColumnIndex(3);
+                ImGui::TextUnformatted(HumanSize(g.size).c_str());
+            }
         }
         ImGui::EndTable();
 

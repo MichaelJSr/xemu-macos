@@ -355,7 +355,7 @@ void xemu_hud_update(void)
     g_scene_mgr.Draw();
     if (!first_boot_window.is_open) notification_manager.Draw();
     g_snapshot_mgr.Draw();
-    if (!first_boot_window.is_open) DrawPerformanceOverlay();
+    DrawPerformanceOverlay();
 
     // static bool show_demo = true;
     // if (show_demo) ImGui::ShowDemoWindow(&show_demo);
@@ -483,7 +483,23 @@ static void SamplePerformanceStats()
  */
 static void DrawPerformanceOverlay()
 {
-    if (!g_config.display.ui.show_fps) {
+    /*
+     * increment_fps changes only at a guest flip: once the flip time has
+     * stood still for a second (a load, a hang), show 0, not the last
+     * rate. Timed on the UI's clock from when the flip time last changed,
+     * tracked while the overlay is hidden too, so turning it on during a
+     * stall shows 0 at once.
+     */
+    static int64_t seen_flip;
+    static uint64_t seen_flip_ms;
+    int64_t flip = g_nv2a_stats.last_flip_time;
+    uint64_t now_ms = SDL_GetTicks();
+    if (flip != seen_flip) {
+        seen_flip = flip;
+        seen_flip_ms = now_ms;
+    }
+
+    if (!g_config.display.ui.show_fps || first_boot_window.is_open) {
         return;
     }
 
@@ -498,7 +514,13 @@ static void DrawPerformanceOverlay()
                             ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.45f);
     if (ImGui::Begin("###xemu_performance_overlay", nullptr, flags)) {
-        ImGui::Text("%u FPS", g_nv2a_stats.increment_fps);
+        if (!runstate_is_running()) {
+            ImGui::TextUnformatted("Paused");
+        } else if (now_ms - seen_flip_ms > 1000) {
+            ImGui::TextUnformatted("0 FPS");
+        } else {
+            ImGui::Text("%u FPS", g_nv2a_stats.increment_fps);
+        }
 #ifdef __APPLE__
         ImGui::Text("CPU %3.0f%%", g_perf_cpu_percent);
         if (g_perf_gpu_percent >= 0.0) {
@@ -507,6 +529,13 @@ static void DrawPerformanceOverlay()
 #endif
     }
     ImGui::End();
+}
+
+/* For the UI loop's focus-loss throttle (ui/xemu.c); UI thread only. */
+extern "C" bool xemu_hud_busy(void);
+extern "C" bool xemu_hud_busy(void)
+{
+    return XboxExplorerBusy();
 }
 
 void xemu_hud_render()

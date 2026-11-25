@@ -329,7 +329,8 @@ display:
     pause_on_focus_loss:
       type: bool
       default: false
-    # Draw a small frame-rate readout over the top-left of the viewport.
+    # Draw a small readout over the top-left of the viewport: the frame
+    # rate, plus CPU and GPU load on macOS.
     show_fps:
       type: bool
       default: false

@@ -1768,7 +1768,7 @@ void xemu_input_update_rumble(ControllerState *state)
     }
 
     float strength = g_config.input.rumble_strength;
-    if (strength < 0.0f) {
+    if (!(strength > 0.0f)) { /* also NaN from a hand-edited toml */
         strength = 0.0f;
     } else if (strength > 1.0f) {
         strength = 1.0f;

@@ -30,7 +30,6 @@ xemu_ss.add(files(
   'xbox-drive-explorer.cc',
   'xbox-drive-qemu.cc',
   'xbox-hdd-blk.c',
-  'xiso.cc',
 ))
 
 xemu_ss.add([curl, files('github-issue.cc')])

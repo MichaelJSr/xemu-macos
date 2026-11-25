@@ -658,15 +658,35 @@ void MainMenuInputView::Draw()
            &g_config.input.background_input_capture,
            "Capture even if window is unfocused (requires restart)");
 
+    // Slider draws no number, so the description carries it (the dead
+    // zone as applied: xemu_input_apply_deadzone caps it at 0.95). Its
+    // button has a fixed ID, so scope each one, or a drag or a D-pad
+    // step on one moves all three.
+    auto percent = [](float v, float max) {
+        return (int)(fmaxf(0.0f, fminf(v, max)) * 100.0f + 0.5f);
+    };
+    char desc[64];
+
     SectionTitle("Analog Sticks");
-    Slider("Left stick dead zone", &g_config.input.deadzone_left,
-           "Ignore small movement near the centre (0 = off, 0.4 = 40%)");
-    Slider("Right stick dead zone", &g_config.input.deadzone_right,
-           "Ignore small movement near the centre (0 = off, 0.4 = 40%)");
+    snprintf(desc, sizeof(desc),
+             "Ignore stick movement near the centre: %d%% (0 = off)",
+             percent(g_config.input.deadzone_left, 0.95f));
+    ImGui::PushID("deadzone_left");
+    Slider("Left stick dead zone", &g_config.input.deadzone_left, desc);
+    ImGui::PopID();
+    snprintf(desc, sizeof(desc),
+             "Ignore stick movement near the centre: %d%% (0 = off)",
+             percent(g_config.input.deadzone_right, 0.95f));
+    ImGui::PushID("deadzone_right");
+    Slider("Right stick dead zone", &g_config.input.deadzone_right, desc);
+    ImGui::PopID();
 
     SectionTitle("Rumble");
-    Slider("Rumble strength", &g_config.input.rumble_strength,
-           "Scale controller vibration (0 = off, 1 = full strength)");
+    snprintf(desc, sizeof(desc), "Controller vibration: %d%% of full strength",
+             percent(g_config.input.rumble_strength, 1.0f));
+    ImGui::PushID("rumble_strength");
+    Slider("Rumble strength", &g_config.input.rumble_strength, desc);
+    ImGui::PopID();
 }
 
 void MainMenuInputView::Hide()
@@ -1018,7 +1038,11 @@ void MainMenuDisplayView::Draw()
     Toggle("Hide mouse cursor", &g_config.display.ui.hide_cursor,
            "Hide the mouse cursor when it is not moving");
     Toggle("Show FPS counter", &g_config.display.ui.show_fps,
-           "Draw a frame-rate readout over the top-left corner of the view");
+#ifdef __APPLE__
+           "Frame rate, CPU and GPU load in the top-left corner of the view");
+#else
+           "Frame rate in the top-left corner of the view");
+#endif
 
     int ui_scale_idx;
     if (g_config.display.ui.auto_scale) {
@@ -1047,6 +1071,22 @@ void MainMenuDisplayView::Draw()
                  "Scale\0"
                  "Stretch\0",
                  "Select how the framebuffer should fit or scale into the window");
+    // Config enum order, as View > Filter Method lists it
+    ChevronCombo("Upscaling filter", &g_config.display.filtering,
+                 "Linear\0"
+                 "Nearest\0"
+                 "AMD FSR 1.0\0"
+                 "Bicubic\0"
+                 "Lanczos\0",
+                 "FSR, bicubic and Lanczos act only when enlarging");
+    if (g_config.display.filtering == CONFIG_DISPLAY_FILTERING_FSR) {
+        float v = fmaxf(0.0f, fminf(g_config.display.fsr_sharpness, 1.0f));
+        char sharp[64];
+        snprintf(sharp, sizeof(sharp),
+                 "RCAS sharpening after FSR (%d%%, 0 = off)",
+                 (int)(v * 100.0f + 0.5f));
+        Slider("FSR sharpness", &g_config.display.fsr_sharpness, sharp);
+    }
     ChevronCombo("Aspect ratio", &g_config.display.ui.aspect_ratio,
                  "Native\0"
                  "Auto (Default)\0"
@@ -1060,7 +1100,7 @@ void MainMenuAudioView::Draw()
     SectionTitle("Volume");
     char buf[32];
     snprintf(buf, sizeof(buf), "Limit output volume (%d%%)",
-             (int)(g_config.audio.volume_limit * 100));
+             (int)(g_config.audio.volume_limit * 100.0f + 0.5f));
     Slider("Output volume limit", &g_config.audio.volume_limit, buf);
 
     SectionTitle("Quality");
@@ -1579,9 +1619,16 @@ void MainMenuSnapshotsView::Draw()
     }
     if (ImGui::Button(snapshot_with_create_name_exists ? "Replace" : "Create",
                       ImVec2(-FLT_MIN, 0))) {
+        // A refused save (a drive copy running) keeps the typed name
+        Error *err = NULL;
         xemu_snapshots_save(m_search_buf.empty() ? NULL : m_search_buf.c_str(),
-                            NULL);
-        ClearSearch();
+                            &err);
+        if (err) {
+            xemu_queue_error_message(error_get_pretty(err));
+            error_free(err);
+        } else {
+            ClearSearch();
+        }
     }
     if (snapshot_with_create_name_exists) {
         ImGui::PopStyleColor(3);

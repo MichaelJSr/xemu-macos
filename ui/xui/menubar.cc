@@ -100,8 +100,15 @@ void ShowMainMenu()
 
             if (ImGui::BeginMenu("Snapshot")) {
                 if (ImGui::MenuItem("Create Snapshot")) {
-                    xemu_snapshots_save(NULL, NULL);
-                    xemu_queue_notification("Created new snapshot");
+                    // Refused while a drive copy runs, among other failures
+                    Error *err = NULL;
+                    xemu_snapshots_save(NULL, &err);
+                    if (err) {
+                        xemu_queue_error_message(error_get_pretty(err));
+                        error_free(err);
+                    } else {
+                        xemu_queue_notification("Created new snapshot");
+                    }
                 }
 
                 for (int i = 0; i < 4; ++i) {

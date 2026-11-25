@@ -661,7 +661,7 @@ static void focus_loss_vm_state_change(void *opaque, bool running,
                                        RunState state)
 {
     if (running) {
-        focus_loss_paused = false;
+        qatomic_set(&focus_loss_paused, false);
     }
 }
 
@@ -669,7 +669,8 @@ static void xemu_focus_loss_pause(void)
 {
     static bool state_handler;
 
-    if (!g_config.display.ui.pause_on_focus_loss || focus_loss_paused) {
+    if (!g_config.display.ui.pause_on_focus_loss ||
+        qatomic_read(&focus_loss_paused)) {
         return;
     }
     if (runstate_is_running()) {
@@ -679,16 +680,16 @@ static void xemu_focus_loss_pause(void)
             state_handler = true;
         }
         vm_stop(RUN_STATE_PAUSED);
-        focus_loss_paused = true;
+        qatomic_set(&focus_loss_paused, true);
     }
 }
 
 static void xemu_focus_loss_resume(void)
 {
-    if (!focus_loss_paused) {
+    if (!qatomic_read(&focus_loss_paused)) {
         return;
     }
-    focus_loss_paused = false;
+    qatomic_set(&focus_loss_paused, false);
     if (!runstate_is_running()) {
         vm_start();
     }
@@ -3020,6 +3021,9 @@ static void restore_configured_renderer(void)
     g_config.display.renderer = configured_renderer;
 }
 
+/* The HUD update has per-frame work: a drive copy job (ui/xui/main.cc). */
+bool xemu_hud_busy(void);
+
 int main(int argc, char **argv)
 {
     QemuThread thread;
@@ -3211,6 +3215,24 @@ int main(int argc, char **argv)
              */
             SDL_DelayNS(qatomic_read(&vblank_interval_ns));
 #endif
+        } else if (qatomic_read(&focus_loss_paused) && !xemu_hud_busy()) {
+            /*
+             * Paused by focus loss: the picture can't change, so redraw the
+             * HUD (notifications) at 10 Hz instead of every refresh, and poll
+             * events every vblank as headless does, so focus gain, a QMP
+             * start, a screendump or quit answer within one. A sleep, not
+             * SDL_WaitEventTimeout: with a pad open SDL polls that wait every
+             * millisecond. A drive copy runs its per-frame budget in the HUD
+             * update, so it keeps full rate. Expose and resize still render
+             * from the event watch.
+             */
+            static uint64_t paused_render_ns;
+            uint64_t now_ns = SDL_GetTicksNS();
+            if (now_ns - paused_render_ns >= 100 * SDL_NS_PER_MS) {
+                paused_render_ns = now_ns;
+                render_frame(scon);
+            }
+            SDL_DelayNS(qatomic_read(&vblank_interval_ns));
         } else {
             render_frame(scon);
         }

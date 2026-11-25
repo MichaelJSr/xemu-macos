@@ -29,13 +29,13 @@ The 2026-07/08 work took the heavy Azurik bench scene (M2 Ultra) from
 - **Resolution and filters:** `display.quality.surface_scale` takes
   fractions such as `0.5` to render below native for speed;
   `display.filtering` adds the `fsr`, `bicubic` and `lanczos` upscalers
-  (View > Filter Method), with `display.fsr_sharpness` for FSR.
+  (Settings > Display), with `display.fsr_sharpness` for FSR.
 - **Tools under Machine:** Game Library (scan the games folder, load a
   disc), Xbox Hard Drive (browse the HDD partitions, copy files in and
   out, back up saves) and Game Patches (apply IPS/BPS/JMP patches or a
   custom XBE through a qcow2 overlay; the disc image is never modified).
-- **UI and input:** an FPS counter (`display.ui.show_fps`), CPU and GPU
-  load in the performance overlay, `display.ui.pause_on_focus_loss`,
+- **UI and input:** an FPS counter (`display.ui.show_fps`; CPU and GPU
+  load on macOS), `display.ui.pause_on_focus_loss`,
   per-stick dead zones (`input.deadzone_left`, `input.deadzone_right`)
   and `input.rumble_strength`.
 - **PAL 50 Hz** vblank as an opt-in (`[sys] vblank_rate`) and a **headless
