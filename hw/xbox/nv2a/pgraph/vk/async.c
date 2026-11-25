@@ -1,23 +1,25 @@
 /*
  * Geforce NV2A PGRAPH Vulkan Renderer: asynchronous draw-pipeline compile
  *
- * A draw whose PipelineKey is a first-encounter miss would otherwise compile
- * on the PFIFO thread, stalling production and the flip ack for the 30-90 ms
- * (worst observed 462 ms) the driver's SPIR-V -> MSL -> Metal lowering takes.
- * Here that miss is handed to one worker thread and the draw is skipped for
- * the frames until the build lands, so the frame time stays flat; the next
- * draw of the key installs the finished pipeline and draws normally. Steady
- * state never reaches this path: the two-tier cache and the prewarm cover
- * repeat content, so only a key's *first* encounter is ever built here.
+ * A draw whose PipelineKey misses the in-memory pipeline LRU would otherwise
+ * compile on the PFIFO thread, stalling production and the flip ack for the
+ * 30-90 ms (worst observed 462 ms) the driver's SPIR-V -> MSL -> Metal
+ * lowering takes. Here that miss is handed to one worker thread and the draw
+ * is skipped for the frames until the build lands, so the frame time stays
+ * flat; the next draw of the key installs the finished pipeline and draws
+ * normally. The LRU starts empty at every launch, so every key's first draws
+ * in a session (and after an eviction) take this path, even when the driver
+ * cache or the prewarm would have built the pipeline in about 1 ms.
  *
- * Skipping a draw is not free: a skipped draw that wrote a render-to-texture
- * surface leaves it a frame stale until the retry. The window is therefore
- * bounded and gated: Settings > "Async pipeline compilation"
- * (perf.async_pipeline_compile) turns it off, a key's build is forced
- * synchronous ASYNC_DEADLINE_NS after it was submitted (a lost or starved
- * worker costs a bounded number of frames, never a hang), a failed submit
- * falls back at once, and no worker is started under icount (deterministic
- * runs want no thread beside them).
+ * Skipping a draw is not free: a one-shot draw (a render-to-texture at a
+ * level load) is lost, a repeated one leaves its surface stale until the
+ * retry, and a skipped draw adds no samples to an open occlusion query. The
+ * feature is therefore opt-in and bounded: Settings > "Async pipeline
+ * compilation" (perf.async_pipeline_compile, off by default) turns it on,
+ * a key's build is forced synchronous ASYNC_DEADLINE_NS after it was
+ * submitted (a lost or starved worker costs a bounded number of frames,
+ * never a hang), a failed submit falls back at once, and no worker is
+ * started under icount (deterministic runs want no thread beside them).
  *
  * The worker builds from the key alone, through the renderer's own builder
  * (pgraph_vk_build_draw_pipeline) and module path, so it makes exactly what
@@ -190,7 +192,7 @@ static void *async_thread(void *opaque)
         while (a->job_count == 0 && !a->stop) {
             qemu_cond_wait(&a->cond, &a->lock);
         }
-        if (a->job_count == 0) { /* stop with an empty queue */
+        if (a->stop) { /* queued jobs own nothing: drop them */
             qemu_mutex_unlock(&a->lock);
             break;
         }
@@ -206,7 +208,8 @@ static void *async_thread(void *opaque)
         if (a->result_count < ASYNC_QUEUE) {
             int idx = (a->result_head + a->result_count) % ASYNC_QUEUE;
             a->results[idx] = res;
-            a->result_count++;
+            /* Atomic: the drain's unlocked hint reads it */
+            qatomic_set(&a->result_count, a->result_count + 1);
         } else {
             /* The renderer is not draining: give the entry up. The key stays
              * pending and the deadline fallback builds it synchronously. */
@@ -274,13 +277,14 @@ void pgraph_vk_async_init(PGRAPHState *pg)
     }
 }
 
-/* Hand a first-encounter miss to the worker. False: no room, build now. */
+/* Hand a first-encounter miss to the worker. False: no room or the worker
+ * is stopping, build now. */
 static bool async_submit(VkAsyncPipeline *a, const PipelineKey *key,
                          uint64_t hash, VkRenderPass render_pass)
 {
     bool ok = false;
     qemu_mutex_lock(&a->lock);
-    if (a->job_count < ASYNC_QUEUE) {
+    if (a->job_count < ASYNC_QUEUE && !a->stop) {
         int idx = (a->job_head + a->job_count) % ASYNC_QUEUE;
         a->jobs[idx].key = *key;
         a->jobs[idx].hash = hash;
@@ -375,7 +379,8 @@ void pgraph_vk_async_drain(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
     VkAsyncPipeline *a = r->async_compile;
-    if (!a) {
+    /* Unlocked hint, every draw: a stale 0 defers the install a draw */
+    if (!a || qatomic_read(&a->result_count) == 0) {
         return;
     }
     for (;;) {
@@ -386,7 +391,7 @@ void pgraph_vk_async_drain(PGRAPHState *pg)
         }
         AsyncResult res = a->results[a->result_head];
         a->result_head = (a->result_head + 1) % ASYNC_QUEUE;
-        a->result_count--;
+        qatomic_set(&a->result_count, a->result_count - 1);
         qemu_mutex_unlock(&a->lock);
 
         async_install(pg, &res);

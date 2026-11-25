@@ -1939,11 +1939,11 @@ static bool create_pipeline(PGRAPHState *pg)
     VkRenderPass render_pass = get_render_pass(r, &key.render_pass_state);
 
     /*
-     * First encounter with this key (the two-tier cache and the prewarm cover
-     * every repeat): hand the build to the async worker and skip the draw
-     * (perf.async_pipeline_compile). The draw returns the frame the build
-     * lands. A failed submit or a late build falls through to the synchronous
-     * path below.
+     * The key's first draw this session (the LRU starts empty) or after an
+     * eviction: with perf.async_pipeline_compile on (opt-in), hand the build
+     * to the async worker and skip the draw. The key draws again the frame
+     * the build lands. No worker, a failed submit or a late build falls
+     * through to the synchronous path below.
      */
     if (pgraph_vk_async_miss(r, snode, &key, hash, render_pass) == ASYNC_SKIP) {
         r->pipeline_binding = NULL;

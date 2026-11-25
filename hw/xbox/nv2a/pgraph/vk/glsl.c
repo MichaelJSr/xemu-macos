@@ -72,7 +72,7 @@ static bool spirv_cache_enabled(void)
 }
 
 /*
- * A kill between the temp write and the rename in save_spirv_to_cache
+ * A kill between the temp write and the rename in write_spirv_to_cache
  * leaves a <hash>.spv.<pid>.tmp behind, and nothing ever reads or
  * replaces that name again: the orphans accumulate in the profile
  * directory forever. Sweep them once per process, right after the cache
@@ -80,7 +80,7 @@ static bool spirv_cache_enabled(void)
  * running instance is still writing costs that instance one cache store
  * (its g_rename then fails and it drops the entry) and can never
  * produce a bad cache entry, because readers only ever open <hash>.spv.
- * This process cannot sweep its own live temp file: save_spirv_to_cache
+ * This process cannot sweep its own live temp file: write_spirv_to_cache
  * resolves the directory - blocking on the once-init below - before it
  * opens one, so the sweep is ordered ahead of every temp file we create.
  */
@@ -307,6 +307,8 @@ typedef struct SpirvSaveJob {
 static GAsyncQueue *spirv_save_queue;
 static QemuThread spirv_save_thread;
 static bool spirv_save_started;
+/* The stop sentinel: GAsyncQueue refuses NULL */
+static SpirvSaveJob spirv_save_stop;
 
 static void write_spirv_to_cache(glslang_target_language_version_t target,
                                  uint64_t hash, GByteArray *spv);
@@ -315,7 +317,7 @@ static void *spirv_save_thread_fn(void *opaque)
 {
     for (;;) {
         SpirvSaveJob *job = g_async_queue_pop(spirv_save_queue);
-        if (!job) { /* the sentinel queued by the compiler's finalize */
+        if (job == &spirv_save_stop) { /* queued by the compiler's finalize */
             break;
         }
         write_spirv_to_cache(job->target, job->hash, job->spv);
@@ -552,7 +554,7 @@ void pgraph_vk_finalize_glsl_compiler(void)
         glsl_warm_started = false;
     }
     if (spirv_save_started) {
-        g_async_queue_push(spirv_save_queue, NULL);
+        g_async_queue_push(spirv_save_queue, &spirv_save_stop);
         qemu_thread_join(&spirv_save_thread);
         spirv_save_started = false;
         g_async_queue_unref(spirv_save_queue);

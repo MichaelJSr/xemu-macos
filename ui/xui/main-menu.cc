@@ -121,9 +121,10 @@ void MainMenuGeneralView::Draw()
            "it through the CPU (currently the surface blit; requires restart)");
 
     Toggle("Async pipeline compilation", &g_config.perf.async_pipeline_compile,
-           "Compile a first-seen draw pipeline on a worker thread and skip "
-           "that draw for the frames until it is ready, keeping a long "
-           "compile off the frame (MoltenVK/KosmicKrisp; requires restart)");
+           "Compile a new draw pipeline on a worker thread and skip its "
+           "draws until it is ready: no first-use hitch, but an object can "
+           "be missing for a frame or two the first time it is drawn "
+           "(MoltenVK/KosmicKrisp; requires restart)");
 
     SectionTitle("Miscellaneous");
     Toggle("Skip startup animation", &g_config.general.skip_boot_anim,
