@@ -43,7 +43,7 @@ tag `archive/windows-wave1-wip`.
 | `XEMU_PFIFO_HEARTBEAT` | 2-second PFIFO diagnostic snapshot |
 | `XEMU_MMIO_PROF` | `1` prints an exit histogram of guest MMIO traffic (region × page, loads/stores) and BQL acquire-wait totals |
 | `XEMU_MAX_QUERIES` | Occlusion-query pool size, default `4096` (`begin_pre_draw` submits before exhaustion) |
-| `XEMU_INPUT_PIPE` | Test input: lines `down <sdl_scancode>`, `up <sdl_scancode>` and `clear` are OR'd into the keyboard-controller state, so keys flow through the user's bindings and work with the window unfocused. POSIX: a FIFO path, opened `O_NONBLOCK`. Windows: a value starting `\\` is the pipe name verbatim (`\\.\pipe\<name>`); otherwise only its last `/`, `\` or `:` component is used, so one `/tmp/xemu.fifo` value works on both hosts. `\r` also ends a line (CRLF writers). Unset = nothing is created and nothing is polled. Clients: `scripts/inject_input.sh`, `scripts/win/inject_input.py` |
+| `XEMU_INPUT_PIPE` | Test input: lines `down <sdl_scancode>`, `up <sdl_scancode>` and `clear` are OR'd into the keyboard-controller state, so keys flow through the user's bindings and work with the window unfocused. POSIX: a FIFO path, opened `O_NONBLOCK`. Windows: a value starting `\\` is the pipe name verbatim (`\\.\pipe\<name>`); otherwise only its last `/`, `\` or `:` component is used, so one `/tmp/xemu.fifo` value works on both hosts. `\r` also ends a line (CRLF writers). Unset = nothing is created and nothing is polled. Client: `scripts/inject_input.py` (both hosts) |
 | `XEMU_MFX_REAL_DEPTH` | Real zeta depth for the temporal scaler (A/B): `2` (or any other non-empty value but `0`) = flip-time snapshot; unset/`0` = synthetic. Engages only when a zeta matches the scaler input dims |
 | `XEMU_GUEST_PROF` | Apple Silicon only (other hosts print a one-time "ignored" line). One-run guest profiler: a mach-thread sampler resolves vCPU samples to guest TBs vs host symbols. Not benchmark-neutral. The per-exit-kind TB-lookup census was removed 2026-10-15 (revert the removal to restore it) |
 | `XEMU_GUEST_BUGCHECK` | `1` hooks the kernel's KeBugCheckEx, found in the export table at each load and at a boot's second vblank (`xemu: guest bugcheck: KeBugCheckEx at 0x80019442 hooked` on the 4627 kernel). Each call prints `xemu: guest bugcheck 0x<code> (<p1>, <p2>, <p3>, <p4>) from <return address>` and a register line, and sends QMP `XEMU_GUEST_BUGCHECK {code, params, caller, count, regs, stack}` (`stack`: 4 KiB of guest memory from ESP in hex, event only). A HLT with interrupts disabled prints `xemu: guest halted with interrupts disabled at <eip> (esp <esp>)` and sends `XEMU_GUEST_HALTED {eip, esp, count}`. First 16 of each per launch. Reads guest state only, so the goldens match with it on (`target/i386/tcg/system/xemu-bugcheck.c`) |
@@ -80,9 +80,9 @@ Darwin and Linux do.
 
 | Env var | Purpose |
 |---|---|
-| `XEMU_BENCH_ISOLATE_CACHES` | `0`: shader/pipeline caches live in the bench cache every bench shares (`XEMU_BASE_PATH` = `$XEMU_BENCH_CACHE`), never the owner's pref dir. `1` or `--isolate-caches` (`bench-savestate-ab.sh`, the Windows bench) plants the scratch config as a portable-mode marker in each cloned bundle's `Contents/Resources`, so `spirv_cache_v*/` and `pipeline_cache.bin` start cold in the work dir at batch start and warm during the warmup. Both arms share one cache only when they run one bundle (`bench-abx.sh` clones it once); two bundles get a cache each. `bench-savestate-ab.sh` always runs one bundle and warms once, on E. Binaries older than `XEMU_BASE_PATH` get this automatically. Recorded as `cache_isolation` (`off`, `shared`, `per-arm`) in `meta.json` / `receipt.json` |
+| `XEMU_BENCH_ISOLATE_CACHES` | `0`: shader/pipeline caches live in the bench cache every bench shares (`XEMU_BASE_PATH` = `$XEMU_BENCH_CACHE`), never the owner's pref dir. `1` or `--isolate-caches` (`bench-abx.sh`, the Windows bench) plants the scratch config as a portable-mode marker in each cloned bundle's `Contents/Resources`, so `spirv_cache_v*/` and `pipeline_cache.bin` start cold in the work dir at batch start and warm during the warmup. Both arms share one cache only when they run one bundle (`bench-abx.sh` clones it once); two bundles get a cache each. `bench-abx.sh --one-warmup` warms once, on E. Binaries older than `XEMU_BASE_PATH` get this automatically. Recorded as `cache_isolation` (`off`, `shared`, `per-arm`) in `meta.json` / `receipt.json` |
 | `XEMU_BENCH_CACHE` | The folder every macOS bench and probe launcher passes as `XEMU_BASE_PATH` (default `~/Library/Caches/xemu-fork-bench`; `scripts/xemu_lease.py`, `scripts/xemu-lease.zsh`). The Windows bench (`bench-savestate-ab-win.py`) defaults to `%LOCALAPPDATA%\xemu-fork-bench` |
-| `XEMU_TEST_CONFIG` | Source config every macOS harness clones its HDD, EEPROM and scratch config from; unset = `../fixtures/xemu.toml` beside the checkout (`bench-det.py`, `bench-abx.sh`, `bench-savestate-ab.sh`, `boot-smoke-corpus.sh`, `probe-run.sh`, `movement-probe.sh`, `cast-probe.py`). `--config-src` wins where a script takes it; `bench-det.py`'s old `XEMU_FIXTURES` folder is gone. No fallback to the personal `xemu.toml`. The Windows bench uses `--config-template`, else this, else `%APPDATA%`'s `xemu.toml` (only ever copied) |
+| `XEMU_TEST_CONFIG` | Source config every macOS harness clones its HDD, EEPROM and scratch config from; unset = `../fixtures/xemu.toml` beside the checkout (`bench-det.py`, `bench-abx.sh`, `probe-run.sh`, `cast-probe.py --walk`; `azurik-pack.py`, `bench-det.py --check d98` and cast-probe's casts read `AZURIK_FX` instead). `--config-src` wins where a script takes it; `bench-det.py`'s old `XEMU_FIXTURES` folder is gone. No fallback to the personal `xemu.toml`. The Windows bench uses `--config-template`, else this, else `%APPDATA%`'s `xemu.toml` (only ever copied) |
 
 ## Changes
 
@@ -576,8 +576,8 @@ are owed**.
   defers eviction; CPU-requested downloads are still honored.
 - **Byte-exact vertex-conflict refinement.** Per-page written spans +
   memcmp skipped byte-identical conflicts: forced finishes 5.65 → 0.37
-  a flip, fps +5.4% (`scripts/bench-savestate-ab.sh`). Superseded by
-  read spans; `uploaded_page_content_differs` went with
+  a flip, fps +5.4% (the windowed A/B, `scripts/bench-abx.sh` today).
+  Superseded by read spans; `uploaded_page_content_differs` went with
   `XEMU_VTX_SPAN_FINISH=0` in v0.16.1.
 - **Targeted vertex-RAM conflict wait.** A write into pages of an
   already-submitted slot waits only that slot's fence; the full finish
@@ -700,8 +700,8 @@ are owed**.
   `__FILE__:__LINE__` in every build (`debug.h`), at upstream
   `assert()`'s cost. Six table-index sites whose field is wider than
   the table now abort where they used to read neighbouring `.rodata`.
-  Corpus-soaked (`scripts/boot-smoke-corpus.sh`); no env hatch by
-  design. Restore by editing that macro (`NV2A_VK_ASSERTS` governs only
+  Corpus-soaked (a cold-boot smoke over the disc corpus); no env hatch
+  by design. Restore by editing that macro (`NV2A_VK_ASSERTS` governs only
   `nv2a_vk_assert`).
 - **volk device-level dispatch on non-Apple.** `volkLoadDevice()` skips
   the loader trampolines (one `VkDevice`). Hygiene; the
@@ -1300,7 +1300,7 @@ are owed**.
   ISA; `build.sh` ignores it on the x86_64 leg. Dev boxes auto-detect
   and warn above `apple-m1`.
 - **Bench batches can isolate caches (2026-08-04).**
-  `scripts/bench-savestate-ab.sh --isolate-caches` /
+  `scripts/bench-abx.sh --isolate-caches` /
   `XEMU_BENCH_ISOLATE_CACHES=1` moves `spirv_cache_v*/` and
   `pipeline_cache.bin` into the work-dir clone: caches start cold, the
   warmup run warms them and both arms share them. The default (`0`)
@@ -1367,9 +1367,9 @@ The pipeline prewarm shipped 2026-10-24 (Pipeline prewarm).
 | Change | What it does |
 |---|---|
 | Harness runs are muted and carry their own pads (2026-10-11) | `scripts/harness-config.py` sets `[audio] volume_limit = 0`, stubs a hub + gamepad (`-device` args, `auto_bind = false`) for players 1-2 not bound to the keyboard, and with `--workdir D` writes the HDD/EEPROM/disc clones, `fullscreen_on_startup = false` and `screenshot_dir = D`; it refuses a toml outside D or a source config and never clones. A run whose xemu exits mid-run is DEAD |
-| Mid-run screenshot artifact check | `scripts/bench-savestate-ab.sh` scores one window shot (`scripts/bench-screenshot.py`, by PID, works unfocused) for white-screen, stuck-uniform-frame and magenta-tile; any ARTIFACT exits 3. Verdicts go to `shot_<label>.verdict` sidecars (xemu's stdout redirect lacks `O_APPEND`) |
-| Scene-anchored bench gating | `scripts/bench-receipt.py` anchors each run at the trailing contiguous in-band run of nsprof intervals, then drops one post-load transient. `--e-value V` serves N-valued knob A/Bs |
-| Movement-phase probe | `scripts/movement-probe.sh`: settle 15 s → forward 20 s → rest → backward 20 s, per-phase `info jit` TB-flush deltas, mid-forward screenshot. Required for TB lifetime/invalidation changes. Takes `--app` and `--isolate-caches`; quits via the monitor so atexit dumps and PGO profiles land |
+| Mid-run screenshot artifact check | `scripts/bench-abx.sh` scores one window shot (`scripts/bench-screenshot.py`, by PID, works unfocused) for white-screen, stuck-uniform-frame and magenta-tile; any ARTIFACT exits 3. Verdicts go to `shot_<label>.verdict` sidecars (xemu's stdout redirect lacks `O_APPEND`) |
+| Scene-anchored bench gating | `scripts/bench-receipt.py` anchors each run at the trailing contiguous in-band run of nsprof intervals, then drops one post-load transient. `--b-env`/`--e-env KNOB=V` serve N-valued knob A/Bs (the Windows bench: `--e-value V`) |
+| Movement-phase probe | `scripts/cast-probe.py --walk` (the movement probe's successor, 2026-11-24): settle 15 s → forward 20 s → rest 5 s → backward 20 s, per-phase `info jit` TB-flush deltas, a scored mid-forward screendump, KK's C2 count. Required for TB lifetime/invalidation changes. Takes `--app`, starts with cold caches unless `--base`; quits via QMP so atexit dumps and PGO profiles land |
 | Bench harness monitor socket moved to `/tmp` | `/tmp/xemu-bench.$$.<label>.sock`, removed per run, stays under macOS's 104-byte AF_UNIX limit. A socket under a deep work dir went past it and every run died as `DEAD (no monitor socket)` (archaeology 9.9) |
 | Ret-memo fill path exports the lookup | `xemu_lookup_tb` (`accel/tcg/cpu-exec.c`) returns the TB, so the fill skips a `tcg_tb_lookup` g_tree walk (~1.8% of vCPU samples). Sub-noise by design |
 | Sub-page consult branch hint corrected | A stale `unlikely()` on the ~90k/s notdirty-write consult is gone |

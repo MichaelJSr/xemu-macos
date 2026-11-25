@@ -268,7 +268,7 @@ and nothing has run in the owner's real configuration. In order:
 
 1. **Quiet-machine fps A/B, main vs a v0.13.2 build**, F8 heavy savestate
    (`vm-20260704173701`), interleaved, ≥3 pairs
-   (`scripts/bench-savestate-ab.sh --app` for the cross-binary shape per
+   (`scripts/bench-abx.sh --app` today for the cross-binary shape per
    the `xemu-testing` skill). Motivation: glslang 16.2→16.5 changed every
    shader's SPIR-V, and the bounds checks are now real branches at 28
    per-draw sites. Accept parity within the ±0.02 fps static noise; a

@@ -104,7 +104,7 @@ The launchers drop an inherited one (`AUTOMATION_ENV`,
 `scripts/xemu_lease.py`); set it per run with an arm or `--env`.
 Windowed launchers follow the setting, so a windowed KK run sets it
 (pgo-train's second heavy-f1 session does) or uses a toml with `driver =
-'kosmickrisp'` (boot-smoke's `--config-src`). Signed releases refuse
+'kosmickrisp'` (bench-abx's `--config-src`). Signed releases refuse
 out-of-bundle dylibs. Validation layers:
 `XEMU_VK_DRIVER=/opt/homebrew/lib/libvulkan.1.dylib`,
 `VK_DRIVER_FILES=<kk icd json>`, `VK_LAYER_PATH=<layer manifests>` and
@@ -166,13 +166,16 @@ on f1 and e2; the fallback matrix (no dylib, corrupt dylib, failed
 acceptance, a KK fatal error or first-frame crash then a relaunch, a
 Settings re-pick, a quit inside the window, MoltenVK failing after KK,
 Auto with a strike on disk, `presentation_backend = 'opengl'`,
-offscreen without icount); C1's check and C2's bar; screendumps against
-MoltenVK (PSNR >= 45 dB, <= 0.01% of pixels off by more than 32); sync
+offscreen without icount); C1's check and C2's bar (`cast-probe.py
+--app A --walk --windowed`, with and without
+`XEMU_VK_DRIVER=kosmickrisp`); screendumps against MoltenVK (PSNR >= 45
+dB, <= 0.01% of pixels off by more than 32: `scripts/score_shot.py
+--diff MVK.png KK.png`, or bench-det `--shot`'s diff block); sync
 validation clean; windowed cross-binary A/Bs at scale 3-4 with MetalFX
 and interpolation; a 30-minute flat-footprint soak, the 8-anchor loadvm
 cycle, the refuter soak (`PROBE_CYCLES=3 scripts/probe-run.sh APP OUT
-azurik-heavy-f1,vm-20260704032357 10 XEMU_SUBPAGE_FAST_REFUTE=1`),
-`boot-smoke-corpus.sh`, the meson xbox suite, CI on all OSes (Roswell's
+azurik-heavy-f1,vm-20260704032357 10 XEMU_SUBPAGE_FAST_REFUTE=1`), the
+meson xbox suite, CI on all OSes (Roswell's
 `- Driver:` line included), a KK smoke run, and a launch smoke on macOS
 15 and Intel.
 
@@ -211,7 +214,10 @@ to `XEMU_VK_DRIVER=moltenvk`).
   bakes depth-stencil, blend and vertex-input state into its shader
   keys; the fix is upstream's (the fork files no Mesa issues). These
   numbers predate `perf.async_pipeline_compile`. Bar: no warm KK frame
-  over 50 ms, and KK's cold count at most one above MoltenVK's.
+  over 50 ms, and KK's cold count at most one above MoltenVK's
+  (`cast-probe.py --app A --walk --windowed
+  XEMU_VK_DRIVER=kosmickrisp` prints the count; `--keep`/`--base` for
+  warm).
   **Mesa 26.3.1 (2026-11-24, async compile on):** passes at its margin,
   counting post-load 5 s nsprof intervals whose flip_gap max exceeds
   50 ms: cold KK 3/2/2 vs MoltenVK 2/2/2; warm KK worst frames

@@ -177,7 +177,7 @@ Parked, with bars: the reports safety valve (`REPORTS_SUBMIT`: 0 submits per fli
 - Scene identity: check draws/flip in both arms (a ~3 draws/flip menu baseline once faked "−30%"). Select intervals by content, not log position.
 - Composition shift: Azurik spends freed CPU on more effect draws. When the arms' draws/flip differ, compare draws/s.
 - A loaded box or leftover harness loops: run `pgrep -fl xemu`, quote the load and add pairs rather than waiting. A 3+/2− sign split is noise.
-- Warm vs cold caches: shared pipeline/shader caches hide first-visit hitches (`movement-probe.sh --isolate-caches`). Static A/Bs miss streaming costs.
+- Warm vs cold caches: shared pipeline/shader caches hide first-visit hitches (`cast-probe.py` and `cast-probe.py --walk` start cold unless `--base`; bench-abx `--isolate-caches`). Static A/Bs miss streaming costs.
 - Wrong binary or config: a running process keeps its old binary; Finder and shell launches get different environments; harnessing `dist/xemu.app` loses the config on rebuild.
 - Cheap-helper deletions: removing cheap, high-IPC helper calls shows in Minsns/frame (1-2%) but not in Mcycles/frame on this box, and heavy load widens the Mcycles/frame spread (28-40): interleave and add pairs.
 - Capped anchors: since the vCPU QoS change both heavy anchors usually sit at the 60 fps cap (6 of 8 UI-QoS runs at ≥59 fps; single runs dipped to 40.6 and 53.5 fps at load 31-43 through short 1-29 fps stalls, so load doesn't predict it and one dipped run isn't a regression). Draws/flip at the cap: heavy-f1 ~576, W2 ~306. Windowed fps hides renderer and CPU gains there; use bench-det, or quote draws/s and per-flip nsprof costs. Older loaded-box windowed receipts partly measure the vCPU's default-QoS share.

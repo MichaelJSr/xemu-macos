@@ -306,7 +306,7 @@ anchors.
 
 ### 2.4 Movement-probe gate for async pipeline creation (arch 1.12 reopen test)
 
-Zero code: run `XEMU_NV2A_NSPROF=1 scripts/movement-probe.sh` and read
+Zero code: run the movement probe (`scripts/cast-probe.py --walk` today) and read
 `pipeline_gen` in the forward (first-visit) phase vs the backward
 control — the one workload class the original steady-state kill never
 measured. **Use the verifier's corrected gate**: a 164 ms compile

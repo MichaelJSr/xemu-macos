@@ -88,8 +88,8 @@ before ranking from it.
 
 Re-rank inputs: `XEMU_GUEST_PROF=1`, `XEMU_INV_PROF=1` (with
 `XEMU_INV_TIMING=1`), `XEMU_NV2A_NSPROF=1`, `XEMU_X87_CENSUS=1` with
-`XEMU_X87_REFUTE=1`, `XEMU_MMIO_PROF=1`, and `scripts/movement-probe.sh`
-for first-visit streaming. Method and thresholds: the `xemu-operate`
+`XEMU_X87_REFUTE=1`, `XEMU_MMIO_PROF=1`, and `scripts/cast-probe.py
+--walk` for first-visit streaming. Method and thresholds: the `xemu-operate`
 skill. `display.frame_interpolation` (MetalFX) delivers displayed
 60/120 from a real 30+ without changing simulation rate or input
 latency, so benches read real flips. An

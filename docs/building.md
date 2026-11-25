@@ -48,8 +48,10 @@ rm -f pgo/*.profraw                      # keep pgo/default.profdata
 cp -Rc dist/xemu.app /tmp/xemu-pgo.app   # never run dist/xemu.app itself
 scripts/pgo-train.py /tmp/xemu-pgo.app   # ~15 min, muted windows
 XEMU_PGO=use ./build.sh                  # merges, updates pgo/PROVENANCE
+python3 -I scripts/bench-det.py --check goldens,d98 new=build/qemu-system-i386
 ```
 
+A retrain must keep the goldens (exit 0; `d98` needs `AZURIK_FX`).
 Then commit `pgo/default.profdata` and `pgo/PROVENANCE`.
 
 The SDK's libc++ headers enter every C++ function's profile hash, so a

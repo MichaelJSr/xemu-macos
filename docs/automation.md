@@ -121,12 +121,17 @@ The macOS launchers in `scripts/` also apply `nice -n 10`, the bench cache
 as `XEMU_BASE_PATH`, a lease `/tmp/xemu-leases/<xemu pid>.json` and one of
 `XEMU_FORK_SLOTS` (4) slots: an `flock` on `/tmp/xemu-leases/slots/<i>.lock`
 through a descriptor xemu inherits, so it lasts as long as that xemu, even
-if its launcher is killed. The contract is in `scripts/xemu_lease.py`:
+if its launcher is killed. A launcher waiting for a slot names, once a
+minute, the holders past their lease's `expected_end`, with their CPU
+against runnable seconds. The launchers take themselves and each xemu out
+of background priority (below), and refuse a binary inside a checkout's
+`dist/`. The contract is in `scripts/xemu_lease.py`:
 
 ```sh
 # nice, marker, bench cache, lease; then becomes the xemu (same pid)
 python3 scripts/xemu_lease.py run -- <xemu> -config_path <toml> ...
 python3 scripts/xemu_lease.py    # a running demo and the live leases
+python3 scripts/xemu_lease.py --automation-env   # the dropped variables
 ```
 
 `XEMU_LEASE_DIR` moves the leases and slots (tests only).
@@ -226,6 +231,12 @@ builds without the table drop it when they save `xemu.toml`.
   into an advance.
 
 ### Background priority and host cost
+
+The fork's launchers (`scripts/xemu_lease.py`, `scripts/xemu-lease.zsh`)
+clear `PRIO_DARWIN_BG` on themselves and on each xemu they start, `run`
+included, and say so on stderr (`lease: launcher was at PRIO_DARWIN_BG
+(PRI 4); cleared`; a pid that stays at PRI 4 is named). Nice 10 stays.
+An xemu that another harness starts under `taskpolicy -b` keeps it:
 
 Under `taskpolicy -b` (macOS) every thread of a headless xemu runs at
 priority 4, almost only on the efficiency cores, and its CPU time bills to

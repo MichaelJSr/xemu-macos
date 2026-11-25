@@ -28,7 +28,8 @@ xemu-history).
   settled experiments. Every landing updates it.
 - [`roadmap.md`](roadmap.md): open candidates with their bars; closed
   ones move to the ledger and `Finished/`.
-- [`RELEASING-macos.md`](RELEASING-macos.md): the release runbook.
+- [`RELEASING-macos.md`](RELEASING-macos.md): the release runbook and
+  its pre-release tier.
 - [`windows-gating-audit.md`](windows-gating-audit.md): fork changes
   that Windows compiles, and what still needs real Windows hardware.
 - [`windows-test-plan.md`](windows-test-plan.md): the runbook for
