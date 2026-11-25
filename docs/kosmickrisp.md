@@ -203,14 +203,22 @@ to `XEMU_VK_DRIVER=moltenvk`).
   query index nobody reads, or a drain before submit). Check: the walk
   on KK at least 40 times at load 70+, all identical; small +/-N
   differences (H1, AGX split variance) get documented instead of fixed.
+  **Mesa 26.3.1 (2026-11-24):** 45 of 45 walks identical (f600
+  `8bd3a3ab8687b2c7`) at load 64-103 (mean 88); no deviant. Not proven
+  fixed (the rc1 rate was 4 in ~150), but no longer reproducing.
 - **C2, first-encounter cost.** Cold walk: 11 hitch intervals on KK, 6
   on MoltenVK; warm, one KK frame of 224 ms from 2 new pipelines. KK
   bakes depth-stencil, blend and vertex-input state into its shader
   keys; the fix is upstream's (the fork files no Mesa issues). These
-  numbers predate `perf.async_pipeline_compile`. Next: on Mesa 26.3.0
-  final, `movement-probe.sh --isolate-caches`, 3 cold and 3 warm per
-  driver. Bar: no warm KK frame over 50 ms, and KK's cold count at most
-  one above MoltenVK's.
+  numbers predate `perf.async_pipeline_compile`. Bar: no warm KK frame
+  over 50 ms, and KK's cold count at most one above MoltenVK's.
+  **Mesa 26.3.1 (2026-11-24, async compile on):** passes at its margin,
+  counting post-load 5 s nsprof intervals whose flip_gap max exceeds
+  50 ms: cold KK 3/2/2 vs MoltenVK 2/2/2; warm KK worst frames
+  21-24 ms (MoltenVK 25-29). KK's cold worst frames stay larger (about
+  615 ms vs 360 ms in the slow-compiler mode), so Auto stays MoltenVK;
+  the fallback matrix, soaks and scale-3/4 A/Bs of the gate weren't
+  run.
 - **Workarounds:** on macOS 26.x KK enables 1-8, 11, 12, 17 and 18 (18
   is inactive on M2); 2 and 6 cover Apple bugs and stay. Measure
   `MESA_KK_DISABLE_WORKAROUNDS=2,6,17` once, with per-arm caches (KK's

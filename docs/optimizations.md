@@ -137,7 +137,7 @@ The first four fix native Vulkan drivers.
 | **`shaderTessellationAndGeometryPointSize` no longer required on non-Apple (2026-08-09)** | Weak or paravirtual ICDs lack the feature (Apple already ran without it). Without it, device init continues and the geometry shader omits the `gl_PointSize` passthrough |
 | **Dynamic-state reuse fixed on native drivers (2026-08-09)** | `begin_draw`'s dedup of line width, depth bias and blend constants could skip `vkCmdSet*` against a previous command buffer's value (VUID-vkCmdDraw-None-07833/07834/07835); MoltenVK keeps dynamic state across command buffers. Within one command buffer, binding a pipeline that held one of those states statically replaced the value on Mesa drivers (KosmicKrisp included) behind the cache. Since 2026-10-19 (`848c45ba58`, every host) every frame pipeline, draw and clear, declares one dynamic-state list (`frame_dynamic_states`) and the `r->dyn` shadow resets only at command-buffer begin |
 | **Texture-upload `bufferOffset` aligned to texel block size (2026-08-09)** | Staging offsets round up to 16 (VUID-VkBufferImageCopy-bufferOffset-00193); MoltenVK accepts any byte offset |
-| **PVIDEO overlay movies on the Vulkan renderer (`632b7fd705`, willemabc)** | FMV through the video overlay (Midtown Madness 3) was black on Vulkan. `vk/display.c` re-uploads the overlay every frame while enabled; `surface-compute.c` reads YUY2 as Y0 U Y1 V (BT.601 limited range); the UI pulls the display when the push-model present ring has been idle over 100 ms |
+| **PVIDEO overlay movies on the Vulkan renderer (`632b7fd705`, willemabc)** | FMV through the video overlay (Midtown Madness 3) was black on Vulkan. `vk/display.c` re-uploads the overlay every frame while enabled, its YUV staging reserved before the command buffer begins (`43a23d17bf`); `surface-compute.c` reads YUY2 as Y0 U Y1 V (BT.601 limited range); the Metal UI pulls the display only while the overlay is on, the guest runs and no flip has published for 100 ms |
 
 ### CPU / numerics (host-architecture correctness)
 
@@ -831,7 +831,26 @@ are owed**.
   `vkCmdCopyImage`, not a CPU round trip; Y8, X8, swizzled and uncached
   blits keep the CPU path. Pending CPU writes upload and pending zpass
   reports deliver first. Gated by `perf.optimizations` (Settings >
-  General, read at start).
+  General, read at start). Since `f4762721d0`: same guest colour format
+  on both sides, integral scale factors only, `xemu_events_gpu_write`
+  like the CPU path. No Azurik scene takes it.
+- **Async first-use pipeline compile** (Better-xemu4macOS, on by
+  default; `vk/async.c`). A pipeline-cache miss compiles on a worker and
+  its draw is skipped until the build lands (sync after 200 ms). Since
+  `507db5fee6` a miss builds in line when the prewarm or this process
+  already built the key, while the guest isn't flipping (loads, boot)
+  and while zpass counting is on; nsprof `async_skip`, `async_warm`,
+  `async_idle`, `async_zpass_sync`. cast-probe (fire-armor, windowed,
+  load 72-105): cold first cast worst gap 152 ms on vs 164-180 off, the
+  frame after the load 266-271 vs ~302 ms; warm, no hitch and no skipped
+  draw either way (223 of 223 misses warm in line). Azurik keeps an
+  occlusion query open for most draws, so 198 of 224 cold misses build
+  in line and ~100 draws a cold run are skipped.
+- **Fractional surface scale** (`display.quality.surface_scale` 0.25,
+  0.5, 0.75; validated by `pgraph_valid_surface_scale`). On the M2 Ultra
+  heavy-f1 holds the 60 fps cap at 0.5, 1 and 2 with flat PFIFO headroom
+  (flip_idle 12.0-12.3 ms) and GPU 4-9%: no gain here; it is for weak
+  GPUs (Intel Macs).
 
 ### MetalFX + presentation
 
