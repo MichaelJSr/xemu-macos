@@ -25,8 +25,8 @@ version instead.
    creates a draft with exactly **6 assets**: the source `.tar.zst`, the
    macOS universal zip, the Windows x86_64 and arm64 zips, and the
    x86_64 and aarch64 AppImages. `-dbg` builds and `-pdb` zips stay
-   artifacts of the tag's run (or of a dispatched full run). Attach
-   nothing else.
+   artifacts of the tag's run for 90 days (push and dispatched runs keep
+   theirs 14 days). Attach nothing else.
 5. **Rewrite the notes** (below).
 6. **Publish:** `gh release edit vX.Y.Z --repo MichaelJSr/xemu-macos
    --draft=false`, then `gh release view vX.Y.Z --repo

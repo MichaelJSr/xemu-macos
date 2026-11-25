@@ -91,6 +91,7 @@ jobs:
       with:
         name: xemu-windows-${{ matrix.arch }}-${{ matrix.configuration }}
         path: dist
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 90 || 14 }}
 
   # Generate a symbols package for Windows. Use cv2pdb to generate PDBs from
   # DWARF and update + strip the executable. Re-package the original release
@@ -137,3 +138,4 @@ jobs:
         name: xemu-windows-${{ matrix.arch }}-${{ matrix.configuration }}-pdb
         path: dist-pdb
         compression-level: 0
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 90 || 14 }}

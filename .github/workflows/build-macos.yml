@@ -265,6 +265,7 @@ jobs:
         name: xemu-macos-${{ matrix.arch }}-${{ matrix.configuration }}
         path: ${{ steps.package.outputs.pkg_filename }}
         compression-level: 0
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 90 || 14 }}
 
   build_universal:
     name: Build macOS Universal bundle (${{ matrix.configuration }})
@@ -331,6 +332,7 @@ jobs:
         name: xemu-macos-universal-${{ matrix.configuration }}
         path: ${{ steps.package.outputs.pkg_filename }}
         compression-level: 0
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 90 || 14 }}
 
   smoke:
     name: Launch
