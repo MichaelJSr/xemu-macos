@@ -66,8 +66,8 @@ xemu: Vulkan driver: MoltenVK (auto)
 ```
 
 The parenthesis is the setting (`MoltenVK (moltenvk)`, or `KosmicKrisp
-(kosmickrisp)` with `- Driver: KosmicKrisp, Mesa 26.3.0-rc1
-(git-4706512989) (id 28)`) or why KK was skipped: a step 2 reason,
+(kosmickrisp)` with `- Driver: KosmicKrisp, Mesa 26.3.1
+(git-fec8830e9c) (id 28)`) or why KK was skipped: a step 2 reason,
 `KosmicKrisp failed in an earlier launch: crashed while starting` or
 `KosmicKrisp unavailable`. In the last case the `xemu: KosmicKrisp
 unavailable (<why>); using MoltenVK` line comes earlier in the same
@@ -113,14 +113,14 @@ out-of-bundle dylibs. Validation layers:
 ## Building KosmicKrisp
 
 `scripts/build-kosmickrisp.sh [package]` builds the Mesa tag pinned in
-`build.sh` (`kk_mesa_tag`, `kk_mesa_sha`; today `mesa-26.3.0-rc1`) into
+`build.sh` (`kk_mesa_tag`, `kk_mesa_sha`; today `mesa-26.3.1`) into
 `../kk/install-<tag>/lib/`, installing nothing system-wide; `package`
 also writes the release tarball (pin bumps: `docs/RELEASING-macos.md`).
 `build.sh` (arm64) bundles the pinned asset
 (`kosmickrisp-<tag>[-<respin>]-arm64.tar.xz`, cached in
 `macos-libs/arm64`, checked against `kk_asset_sha256`) and logs
-`Bundling KosmicKrisp from <tarball> (Mesa 26.3.0-rc1
-(git-4706512989))`; `licenses/kosmickrisp` must match the asset's
+`Bundling KosmicKrisp from <tarball> (Mesa 26.3.1
+(git-fec8830e9c))`; `licenses/kosmickrisp` must match the asset's
 `share/kosmickrisp/LICENSES`. `XEMU_KK_PREFIX=../kk/install-<tag>
 ./build.sh` bundles a local build instead and sets its install name to
 `@rpath`; nothing else is ever picked up, `/usr/local` and Homebrew

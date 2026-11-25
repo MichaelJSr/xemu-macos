@@ -86,10 +86,10 @@ vendor_moltenvk() {
 # scripts/build-kosmickrisp.sh reads the tag, sha and respin; arm64
 # builds bundle the asset (resolve_kk). Bump them together in one
 # commit (docs/RELEASING-macos.md).
-kk_mesa_tag=mesa-26.3.0-rc1
-kk_mesa_sha=470651298910062f5ad5c4e7fb480c60c6943bc9
+kk_mesa_tag=mesa-26.3.1
+kk_mesa_sha=fec8830e9c94b1d67f3d8469467d5529fb2978cd
 kk_respin=
-kk_asset_sha256=9f8a91d110e8bbef482238961ae7a70f636a1516293ce10a9f8c1c40dd5f75ce
+kk_asset_sha256=97458848468bb548c87787a74991b575ea3cf296359f1138ae634791c7196f07
 
 # The KosmicKrisp dylib an arm64 bundle ships beside MoltenVK, into
 # kk_dylib (kk_from: where it came from, for the provenance line):
