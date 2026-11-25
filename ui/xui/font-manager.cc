@@ -54,6 +54,28 @@ void FontManager::Rebuild()
         m_default_font = io.Fonts->AddFontFromMemoryTTF(
             (void *)Roboto_Medium_data, Roboto_Medium_size,
             16.0f * scale, &config);
+    }
+    {
+        // FontAwesome for windows drawn in the default font. MergeMode
+        // merges into the last font added, so this stays right after
+        // m_default_font. Private-use area only, so arrows, check marks
+        // etc. in file names and titles are not drawn as icons.
+        ImFontConfig config;
+        config.FontDataOwnedByAtlas = false;
+        config.RasterizerDensity = pixel_density;
+        config.MergeMode = true;
+        config.GlyphOffset = ImVec2(0, 1 * scale);
+        config.GlyphMinAdvanceX = 16.0f * scale;
+        static const ImWchar icon_ranges[] = { 0xe000, 0xf8ff, 0 };
+        io.Fonts->AddFontFromMemoryTTF((void *)font_awesome_6_1_1_solid_min_data,
+                                       font_awesome_6_1_1_solid_min_size,
+                                       15.0f * scale,
+                                       &config, icon_ranges);
+    }
+    {
+        ImFontConfig config;
+        config.FontDataOwnedByAtlas = false;
+        config.RasterizerDensity = pixel_density;
         m_menu_font_small = io.Fonts->AddFontFromMemoryTTF(
             (void *)RobotoCondensed_Regular_data, RobotoCondensed_Regular_size,
             22.0f * scale, &config);
