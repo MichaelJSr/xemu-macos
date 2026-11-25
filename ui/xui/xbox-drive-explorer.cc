@@ -15,7 +15,6 @@
 #include <ctime>
 #include <filesystem>
 #include <functional>
-#include <map>
 #include <memory>
 
 #include "common.hh"
@@ -23,7 +22,7 @@
 #include "misc.hh"
 #include "viewport-manager.hh"
 #include "xbox-drive-qemu.hh"
-#include "xiso.hh"
+#include "../xemu-notifications.h"
 #include "../xemu-settings.h"
 
 // The interface is English-only here (this fork has no translation layer):
@@ -37,9 +36,12 @@ namespace fs = std::filesystem;
 namespace
 {
 
+// A static: its destructor writes nothing (the drive is closed under the
+// BQL when the window closes and at shutdown, see ShutdownDrive)
 XboxDrive g_drive;
 std::string g_open_err;
 uint64_t g_open_tried = 0; // ticks of the last failed open
+unsigned g_drive_loads = 0; // snapshot loads when the drive was opened
 char g_vol = 'E';
 std::string g_path = "/";
 std::vector<XboxFileInfo> g_list;
@@ -95,6 +97,8 @@ std::string FormatTime(time_t t)
     return b;
 }
 
+void ShutdownDrive();
+
 bool EnsureOpen()
 {
     if (g_drive.IsOpen()) {
@@ -110,6 +114,12 @@ bool EnsureOpen()
         return false;
     }
     g_open_tried = 0;
+    g_drive_loads = XboxSnapshotLoads();
+    static bool shutdown_hooked = false;
+    if (!shutdown_hooked) {
+        XboxOnShutdown(ShutdownDrive);
+        shutdown_hooked = true;
+    }
     if (!g_drive.Volume(g_vol)) {
         g_vol = g_drive.Volumes()[0].letter;
         g_path = "/";
@@ -118,12 +128,17 @@ bool EnsureOpen()
     return true;
 }
 
-// Re-read the disk (the running Xbox may have changed it)
-void Reopen()
+// Re-read the disk (the running Xbox may have changed it). The free space
+// counted before is kept unless keep_free is false (a full FAT scan).
+void Reopen(bool keep_free = true)
 {
+    std::vector<XboxVolume> before = g_drive.Volumes();
     g_drive.Close();
     g_open_tried = 0;
     EnsureOpen();
+    if (keep_free) {
+        g_drive.KeepFreeSpace(before);
+    }
     g_list_dirty = true;
 }
 
@@ -164,11 +179,10 @@ void Navigate(char vol, const std::string &path)
 // ---- Jobs: copy in, copy out, delete ---------------------------------------
 
 struct Step {
-    enum Kind { XMkDir, XFile, HMkDir, HFile, XDelFile, XDelDir, IsoFile } kind;
+    enum Kind { XMkDir, XFile, HMkDir, HFile, XDelFile, XDelDir } kind;
     std::string host;  // host path (UTF-8)
     std::string xpath; // path on the Xbox volume
     uint64_t size = 0;
-    uint64_t dest = 0; // IsoFile: byte offset in the disc image
 };
 
 struct Job {
@@ -184,32 +198,14 @@ struct Job {
     std::string err;
     std::vector<uint8_t> buf;
     int files = 0;
-    // Disc image jobs
-    FILE *iso = nullptr;
-    std::string iso_part, iso_final, iso_sig;
+    uint64_t disk_writes = 0; // XboxDiskWriteCount() at the start
 };
 
-FILE *OpenHost(const std::string &path, const char *mode)
-{
-#ifdef _WIN32
-    std::wstring m(mode, mode + strlen(mode));
-    return _wfopen(fs::u8path(path).wstring().c_str(), m.c_str());
-#else
-    return fopen(path.c_str(), mode);
-#endif
-}
-
-bool SeekHost(FILE *f, uint64_t off)
-{
-#ifdef _WIN32
-    return _fseeki64(f, (__int64)off, SEEK_SET) == 0;
-#else
-    return fseeko(f, (off_t)off, SEEK_SET) == 0;
-#endif
-}
-
 std::unique_ptr<Job> g_job;
-bool g_paused_for_job = false;
+bool g_paused_for_job = false; // a write job paused a running Xbox
+
+// Deepest folder nesting a job walks (a damaged drive can loop)
+constexpr int kMaxDepth = 64;
 
 // Confirmation before a job that writes to the Xbox drive
 std::unique_ptr<Job> g_pending_write;
@@ -256,10 +252,44 @@ bool HostToXboxSteps(const fs::path &src, const std::string &xdir, Job *job,
     return true;
 }
 
-bool XboxToHostSteps(char vol, const std::string &xpath, const XboxFileInfo &fi,
-                     const fs::path &hdir, Job *job, std::string *err)
+// A name read off the Xbox drive, as a file name in a folder on this
+// computer. The image can hold any bytes ("..", "/", "C:", control
+// characters), so only names the Xbox itself could make pass.
+bool HostSafeName(const std::string &name, std::string *why)
 {
+    if (!XboxValidName(name, why)) {
+        return false;
+    }
+#ifdef _WIN32
+    // Windows drops trailing dots and spaces ("..." would be the folder)
+    if (name.back() == '.' || name.back() == ' ') {
+        *why = "Windows can't use a name that ends in a dot or a space";
+        return false;
+    }
+#endif
+    return true;
+}
+
+bool XboxToHostSteps(char vol, const std::string &xpath, const XboxFileInfo &fi,
+                     const fs::path &hdir, Job *job, std::string *err,
+                     int depth = 0)
+{
+    std::string why;
+    if (!HostSafeName(fi.name, &why)) {
+        *err = "\"" + fi.name + "\" on the Xbox: " + why;
+        return false;
+    }
+    if (depth > kMaxDepth) {
+        *err = tr("Folders nested too deeply");
+        return false;
+    }
     fs::path hpath = hdir / fs::u8path(fi.name);
+    // And it stays in the folder
+    fs::path rel = hpath.lexically_normal().lexically_relative(hdir.lexically_normal());
+    if (rel.empty() || rel == "." || *rel.begin() == "..") {
+        *err = "\"" + fi.name + "\" on the Xbox: not a plain file name";
+        return false;
+    }
     if (!fi.dir) {
         job->steps.push_back({ Step::HFile, hpath.u8string(), xpath, fi.size });
         job->total += fi.size;
@@ -272,7 +302,8 @@ bool XboxToHostSteps(char vol, const std::string &xpath, const XboxFileInfo &fi,
         return false;
     }
     for (auto &c : list) {
-        if (!XboxToHostSteps(vol, XboxJoin(xpath, c.name), c, hpath, job, err)) {
+        if (!XboxToHostSteps(vol, XboxJoin(xpath, c.name), c, hpath, job, err,
+                             depth + 1)) {
             return false;
         }
     }
@@ -280,15 +311,19 @@ bool XboxToHostSteps(char vol, const std::string &xpath, const XboxFileInfo &fi,
 }
 
 bool DeleteSteps(char vol, const std::string &xpath, const XboxFileInfo &fi,
-                 Job *job, std::string *err)
+                 Job *job, std::string *err, int depth = 0)
 {
+    if (depth > kMaxDepth) {
+        *err = tr("Folders nested too deeply");
+        return false;
+    }
     if (fi.dir) {
         std::vector<XboxFileInfo> list;
         if (!g_drive.List(vol, xpath, &list, err)) {
             return false;
         }
         for (auto &c : list) {
-            if (!DeleteSteps(vol, XboxJoin(xpath, c.name), c, job, err)) {
+            if (!DeleteSteps(vol, XboxJoin(xpath, c.name), c, job, err, depth + 1)) {
                 return false;
             }
         }
@@ -303,16 +338,28 @@ bool DeleteSteps(char vol, const std::string &xpath, const XboxFileInfo &fi,
 
 void StartJob(std::unique_ptr<Job> job)
 {
+    if (g_job) {
+        // An async file dialog can come back while a job runs
+        SetStatus(tr("Another copy is still running"), true);
+        return;
+    }
     if (job->writes) {
         // The Xbox caches its file system: pause it, start from a fresh view
-        // of the disk, and restart it when done
+        // of the disk, and restart it when done. Until then it stays paused
+        // and snapshots can't be saved.
         g_paused_for_job = XboxIsRunning();
         XboxPause();
         Reopen();
         if (!g_drive.IsOpen()) {
+            if (g_paused_for_job) {
+                XboxResume();
+            }
+            g_paused_for_job = false;
             SetStatus(g_open_err, true);
             return;
         }
+        XboxJobBegin();
+        job->disk_writes = XboxDiskWriteCount();
     }
     job->buf.resize(1 << 20);
     g_job = std::move(job);
@@ -332,63 +379,107 @@ void AskThenStart(std::unique_ptr<Job> job)
     StartJob(std::move(job));
 }
 
-void FinishJob()
+// What a change to the drive did to the Xbox
+std::string RestartNote(bool resumed)
+{
+    return std::string(" ") +
+           (resumed ? tr("The Xbox restarted to load the changes.")
+                    : tr("The Xbox was reset to load the changes and stays paused."));
+}
+
+// End the job. At shutdown the Xbox isn't restarted.
+void FinishJob(bool shutdown = false)
 {
     Job &j = *g_job;
+    bool open_host_file = j.f != nullptr;
     if (j.f) {
         fclose(j.f);
         j.f = nullptr;
     }
     if (j.cancel && j.i < j.steps.size()) {
-        // Don't leave a half-copied file behind
+        // Don't leave a half-copied file behind (only the one being written:
+        // a step not started yet may name a file that was already there)
         Step &s = j.steps[j.i];
         std::string e;
         if (s.kind == Step::XFile && j.off > 0) {
             g_drive.RemoveFile(j.vol, s.xpath, &e);
-        } else if (s.kind == Step::HFile) {
+        } else if (s.kind == Step::HFile && open_host_file) {
             std::error_code ec;
             fs::remove(fs::u8path(s.host), ec);
         }
     }
-    if (j.iso) {
-        bool ok = fclose(j.iso) == 0 && j.err.empty() && !j.cancel;
-        j.iso = nullptr;
-        std::error_code ec;
-        if (ok) {
-            fs::remove(fs::u8path(j.iso_final), ec);
-            fs::rename(fs::u8path(j.iso_part), fs::u8path(j.iso_final), ec);
-            ok = !ec;
-            if (!ok) {
-                j.err = tr("Couldn't save the disc image");
-            }
-        }
-        if (ok) {
-            FILE *sf = OpenHost(j.iso_final + ".sig", "wb");
-            if (sf) {
-                fwrite(j.iso_sig.data(), 1, j.iso_sig.size(), sf);
-                fclose(sf);
-            }
-        } else {
-            fs::remove(fs::u8path(j.iso_part), ec);
-        }
-    }
+    std::string note;
     if (j.writes) {
         g_drive.Flush();
-        g_drive.UpdateFreeSpace(j.vol);
-        XboxRestart();
+        XboxJobEnd();
+        if (!shutdown) {
+            g_drive.UpdateFreeSpace(j.vol);
+            // Reset only if the disk changed, and keep a paused Xbox paused
+            if (XboxDiskWriteCount() != j.disk_writes) {
+                XboxRestart(g_paused_for_job);
+                note = RestartNote(g_paused_for_job);
+            } else if (g_paused_for_job) {
+                XboxResume();
+            }
+        }
         g_paused_for_job = false;
     }
     if (!j.err.empty()) {
-        SetStatus(j.err, true);
+        SetStatus(j.err + note, true);
     } else if (j.cancel) {
-        SetStatus(tr("Cancelled"));
+        SetStatus(tr("Cancelled.") + note);
     } else {
-        SetStatus(j.title + " - " + tr("done.") +
-                  (j.writes ? std::string(" ") + tr("The Xbox restarted to load the changes.")
-                            : std::string()));
+        SetStatus(j.title + " - " + tr("done.") + note);
     }
     g_job.reset();
     g_list_dirty = true;
+}
+
+// A snapshot load reverted the disk under the job: what libfatx has cached
+// is stale, so stop without writing anything more. At shutdown the Xbox
+// isn't resumed.
+void AbandonJob(bool shutdown = false)
+{
+    Job &j = *g_job;
+    if (j.f) {
+        fclose(j.f);
+        j.f = nullptr;
+        if (j.i < j.steps.size() && j.steps[j.i].kind == Step::HFile) {
+            std::error_code ec;
+            fs::remove(fs::u8path(j.steps[j.i].host), ec);
+        }
+    }
+    g_drive.Discard();
+    g_open_tried = 0;
+    if (j.writes) {
+        XboxJobEnd();
+        if (g_paused_for_job && !shutdown) {
+            XboxResume();
+        }
+        g_paused_for_job = false;
+    }
+    SetStatus(tr("Stopped: a snapshot was loaded during the copy"), true);
+    g_job.reset();
+    g_list_dirty = true;
+}
+
+// xemu is quitting: end a job and close the drive while the block layer is
+// still there (shutdown notifier, BQL held)
+void ShutdownDrive()
+{
+    if (g_drive.IsOpen() && XboxSnapshotLoads() != g_drive_loads) {
+        // A load reverted the disk since the drive was opened (and
+        // XboxExplorerUpdate hasn't run since): write nothing
+        if (g_job) {
+            AbandonJob(true);
+        }
+        g_drive.Discard();
+    } else if (g_job) {
+        g_job->cancel = true;
+        FinishJob(true);
+    }
+    g_pending_write.reset();
+    g_drive.Close();
 }
 
 // Do one piece of work; false when the job has ended
@@ -467,24 +558,6 @@ bool RunStep(Job &j)
         }
         return true;
     }
-    case Step::IsoFile: {
-        size_t want = (size_t)std::min<uint64_t>(j.buf.size(), s.size - j.off);
-        int64_t n = want ? g_drive.ReadAt(j.vol, s.xpath, j.off, j.buf.data(), want)
-                         : 0;
-        if (n < 0 || (want && n == 0) || !SeekHost(j.iso, s.dest + j.off) ||
-            (n > 0 && fwrite(j.buf.data(), 1, (size_t)n, j.iso) != (size_t)n)) {
-            j.err = string_format(tr("Couldn't copy %s into the disc image"),
-                                  s.xpath.c_str());
-            return false;
-        }
-        j.off += n;
-        j.done += n;
-        if (j.off >= s.size) {
-            j.off = 0;
-            j.i++;
-        }
-        return true;
-    }
     case Step::HFile: {
         if (!j.f) {
 #ifdef _WIN32
@@ -532,6 +605,10 @@ const XboxFileInfo *Selected()
 
 void AddHostPaths(const std::vector<std::string> &paths)
 {
+    if (g_job) {
+        SetStatus(tr("Another copy is still running"), true);
+        return;
+    }
     auto job = std::make_unique<Job>();
     job->writes = true;
     job->vol = g_vol;
@@ -558,6 +635,10 @@ void ExportSelected(const std::string &host_dir)
 {
     const XboxFileInfo *fi = Selected();
     if (!fi) {
+        return;
+    }
+    if (g_job) {
+        SetStatus(tr("Another copy is still running"), true);
         return;
     }
     auto job = std::make_unique<Job>();
@@ -595,16 +676,30 @@ void DeleteSelected()
 // they get the same pause/restart handling
 void SimpleWrite(const std::string &title, std::function<bool(std::string *)> op)
 {
-    g_paused_for_job = XboxIsRunning();
+    if (g_job) {
+        SetStatus(tr("Another copy is still running"), true);
+        return;
+    }
+    bool was_running = XboxIsRunning();
     XboxPause();
     Reopen();
+    uint64_t writes = XboxDiskWriteCount();
     std::string err;
     bool ok = g_drive.IsOpen() && op(&err);
-    g_drive.Flush();
-    XboxRestart();
-    g_paused_for_job = false;
-    SetStatus(ok ? title + " - " + tr("done. The Xbox restarted to load the change.")
-                 : (err.empty() ? g_open_err : err),
+    if (g_drive.IsOpen()) {
+        g_drive.Flush();
+    }
+    // Reset only if the disk changed (a failed op may have written part of
+    // it), and keep a paused Xbox paused
+    std::string note;
+    if (XboxDiskWriteCount() != writes) {
+        XboxRestart(was_running);
+        note = RestartNote(was_running);
+    } else if (was_running) {
+        XboxResume();
+    }
+    SetStatus(ok ? title + " - " + tr("done.") + note
+                 : (err.empty() ? g_open_err : err) + note,
               !ok);
     g_list_dirty = true;
 }
@@ -699,7 +794,7 @@ void DrawToolbar()
     }
     ImGui::SameLine();
     if (ImGui::Button(tr(ICON_FA_ROTATE " Refresh"))) {
-        Reopen();
+        Reopen(false);
     }
     ImGui::SameLine();
     if (ImGui::Button(tr(ICON_FA_FOLDER_PLUS " New folder"))) {
@@ -742,15 +837,6 @@ void DrawToolbar()
     ImGui::EndDisabled();
 }
 
-// "4D530003" -> "Project Gotham Racing" for folders named by title ID.
-// The modern-gui asks its game library for the title; without one, nothing
-// extra is shown.
-std::string TitleFolderName(const XboxFileInfo &fi)
-{
-    (void)fi;
-    return "";
-}
-
 void DrawList(float height)
 {
     const float s = g_viewport_mgr.m_scale;
@@ -788,12 +874,6 @@ void DrawList(float height)
         bool clicked = ImGui::Selectable(label.c_str(), g_sel == i,
                                          ImGuiSelectableFlags_SpanAllColumns |
                                              ImGuiSelectableFlags_AllowDoubleClick);
-        // Save and cache folders are named by title ID: show the game
-        std::string game = TitleFolderName(fi);
-        if (!game.empty()) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("  %s", game.c_str());
-        }
         if (clicked) {
             g_sel = i;
             bool mouse = ImGui::IsMouseReleased(ImGuiMouseButton_Left) ||
@@ -1096,12 +1176,15 @@ void DrawPopups()
         ImGui::TextWrapped(tr("The Xbox pauses while the files are written and "
                            "restarts when they're done. Progress in a running "
                            "game that hasn't been saved will be lost."));
+        // Waits for a job that started while a file dialog was open
+        ImGui::BeginDisabled(g_job != nullptr);
         if (ImGui::Button(tr("Copy to the Xbox"))) {
             ImGui::CloseCurrentPopup();
             if (g_pending_write) {
                 StartJob(std::move(g_pending_write));
             }
         }
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button(tr("Cancel")) || CancelPressed()) {
             g_pending_write.reset();
@@ -1115,13 +1198,32 @@ void DrawPopups()
 
 void XboxExplorerUpdate(void)
 {
+    if (XboxTakeResumeRefused()) {
+        xemu_queue_notification(
+            tr("The Xbox stays paused until the copy to its hard drive is done"));
+    }
+    if (g_drive.IsOpen() && XboxSnapshotLoads() != g_drive_loads) {
+        // A snapshot load reverted the disk under the open drive
+        if (g_job) {
+            AbandonJob();
+        } else {
+            g_drive.Discard();
+            g_open_tried = 0;
+            g_list_dirty = true;
+        }
+    }
     if (!g_job) {
         return;
     }
-    // About 12 ms of work per frame (the step limit only matters if the
-    // clock is coarse)
-    uint64_t start = SDL_GetTicks();
-    for (int n = 0; n < 256 && SDL_GetTicks() - start < 12; n++) {
+    if (g_job->writes && XboxIsRunning()) {
+        XboxPause(); // resumed past XboxJobBegin's hold: stop it again
+    }
+    // Work per frame, holding the BQL: about 12 ms while the Xbox is paused,
+    // 2 ms while it runs (a read job) so it keeps its frame rate. The step
+    // limit only matters if the clock is coarse.
+    uint64_t budget_ns = (g_job->writes || !XboxIsRunning()) ? 12000000 : 2000000;
+    uint64_t start = SDL_GetTicksNS();
+    for (int n = 0; n < 256 && SDL_GetTicksNS() - start < budget_ns; n++) {
         if (!RunStep(*g_job)) {
             FinishJob();
             return;
@@ -1133,248 +1235,6 @@ bool XboxExplorerBusy(void)
 {
     return g_job != nullptr;
 }
-
-void XboxExplorerShowFolder(char vol, const std::string &path)
-{
-    if (g_job) {
-        return;
-    }
-    Navigate(vol, path);
-}
-
-bool XboxExplorerInstallFolder(const std::string &host_dir, char vol,
-                               const std::string &parent, const std::string &name,
-                               const std::string &title, std::string *err)
-{
-    if (g_job) {
-        *err = tr("Another copy to the Xbox is still running");
-        return false;
-    }
-    std::string why;
-    if (!XboxValidName(name, &why)) {
-        *err = "\"" + name + "\": " + why;
-        return false;
-    }
-    if (!EnsureOpen()) {
-        *err = g_open_err.empty() ? std::string(tr("Can't open the Xbox hard drive")) : g_open_err;
-        return false;
-    }
-    if (!g_drive.Volume(vol)) {
-        *err = string_format(tr("This hard disk image has no %c: drive"), vol);
-        return false;
-    }
-    if (!XboxDiskEmulatedWritable()) {
-        *err = tr("The hard disk image is read-only");
-        return false;
-    }
-    // Plan everything before pausing, so a problem leaves the Xbox running
-    auto job = std::make_unique<Job>();
-    job->writes = true;
-    job->vol = vol;
-    job->title = title;
-    // The Xbox ignores case but libfatx doesn't: reuse "apps" if that's
-    // what's there rather than making a second "Apps"
-    auto same_case = [vol](const std::string &dir, const std::string &leaf) {
-        std::vector<XboxFileInfo> list;
-        std::string e, want = leaf;
-        std::transform(want.begin(), want.end(), want.begin(), ::tolower);
-        if (g_drive.List(vol, dir, &list, &e)) {
-            for (auto &f : list) {
-                std::string n = f.name;
-                std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-                if (n == want) {
-                    return f.name;
-                }
-            }
-        }
-        return leaf;
-    };
-    std::string parent_path = XboxParent(parent);
-    std::string resolved_parent =
-        parent == "/" ? parent
-                      : XboxJoin(parent_path,
-                                 same_case(parent_path,
-                                           parent.substr(parent.find_last_of('/') + 1)));
-    std::string resolved_name = same_case(resolved_parent, name);
-    std::string target = XboxJoin(resolved_parent, resolved_name);
-    XboxFileInfo fi;
-    if (!g_drive.Stat(vol, resolved_parent, &fi)) {
-        job->steps.push_back({ Step::XMkDir, "", resolved_parent, 0 });
-    } else if (!fi.dir) {
-        *err = string_format(tr("%s on %c: is a file"), parent.c_str(), vol);
-        return false;
-    } else if (g_drive.Stat(vol, target, &fi)) {
-        // An update: the old version goes first
-        fi.name = resolved_name;
-        if (!DeleteSteps(vol, target, fi, job.get(), err)) {
-            return false;
-        }
-    }
-    job->steps.push_back({ Step::XMkDir, host_dir, target, 0 });
-    std::error_code ec;
-    std::vector<fs::path> children;
-    for (auto &e : fs::directory_iterator(fs::u8path(host_dir), ec)) {
-        children.push_back(e.path());
-    }
-    std::sort(children.begin(), children.end());
-    if (children.empty()) {
-        *err = tr("There's nothing to copy");
-        return false;
-    }
-    for (auto &c : children) {
-        if (!HostToXboxSteps(c, target, job.get(), err)) {
-            return false;
-        }
-    }
-    const XboxVolume *v = g_drive.Volume(vol);
-    if (v && !v->free_known) {
-        g_drive.UpdateFreeSpace(vol);
-        v = g_drive.Volume(vol);
-    }
-    if (v && v->free_known && job->total > v->free) {
-        *err = string_format(tr("Not enough space on %c: (%s needed, %s free)"), vol,
-                             FormatSize(job->total).c_str(), FormatSize(v->free).c_str());
-        return false;
-    }
-    // Planned against the disk as it was; StartJob re-reads it after pausing
-    StartJob(std::move(job));
-    if (!g_job) {
-        *err = g_status;
-        return false;
-    }
-    // Show where it went (not Navigate: that would re-read the disk mid-job)
-    g_vol = vol;
-    g_path = resolved_parent;
-    g_list_dirty = true;
-    return true;
-}
-
-namespace
-{
-// Folder tree on the Xbox drive, for a disc image; *sig summarizes it
-bool XisoTree(char vol, const std::string &path, XisoNode *node, uint64_t *sig,
-              int depth, std::string *err)
-{
-    if (depth > 32) {
-        *err = tr("Folders nested too deeply");
-        return false;
-    }
-    std::vector<XboxFileInfo> list;
-    if (!g_drive.List(vol, path, &list, err)) {
-        return false;
-    }
-    for (auto &fi : list) {
-        XisoNode k;
-        k.name = fi.name;
-        k.dir = fi.dir;
-        k.size = fi.dir ? 0 : fi.size;
-        k.source = XboxJoin(path, fi.name);
-        std::string key = k.source + "|" + std::to_string(k.size) + "|" +
-                          std::to_string((long long)fi.modified) + "\n";
-        for (unsigned char c : key) {
-            *sig = (*sig ^ c) * 1099511628211ull;
-        }
-        if (fi.dir && !XisoTree(vol, k.source, &k, sig, depth + 1, err)) {
-            return false;
-        }
-        node->kids.push_back(std::move(k));
-    }
-    return true;
-}
-
-std::string ReadSmallHostFile(const std::string &path)
-{
-    std::string out;
-    FILE *f = OpenHost(path, "rb");
-    if (f) {
-        char b[256];
-        size_t n = fread(b, 1, sizeof(b), f);
-        out.assign(b, n);
-        fclose(f);
-    }
-    return out;
-}
-
-std::string Utf16Le(const uint8_t *p, size_t max_chars)
-{
-    std::string out;
-    for (size_t i = 0; i < max_chars; i++) {
-        unsigned c = p[i * 2] | (p[i * 2 + 1] << 8);
-        if (!c) {
-            break;
-        }
-        if (c < 0x80) {
-            out += (char)c;
-        } else if (c < 0x800) {
-            out += (char)(0xC0 | (c >> 6));
-            out += (char)(0x80 | (c & 0x3F));
-        } else if (c < 0xD800 || c > 0xDFFF) {
-            out += (char)(0xE0 | (c >> 12));
-            out += (char)(0x80 | ((c >> 6) & 0x3F));
-            out += (char)(0x80 | (c & 0x3F));
-        }
-    }
-    return out;
-}
-
-// Title name, ID and title image from an XBE
-void ReadXbeTitle(char vol, const std::string &xbe, XboxHomebrewApp *app)
-{
-    auto le32 = [](const uint8_t *p) {
-        return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
-               (uint32_t)p[3] << 24;
-    };
-    uint8_t h0[0x180];
-    if (g_drive.ReadAt(vol, xbe, 0, h0, sizeof(h0)) != (int64_t)sizeof(h0) ||
-        memcmp(h0, "XBEH", 4) != 0) {
-        return;
-    }
-    uint32_t base = le32(h0 + 0x104), hsize = le32(h0 + 0x108);
-    if (hsize < sizeof(h0) || hsize > 4 * 1024 * 1024 || hsize > app->xbe_size) {
-        // Odd header size: the certificate is still near the start
-        hsize = (uint32_t)std::min<uint64_t>(app->xbe_size, 0x10000);
-    }
-    std::vector<uint8_t> hdr(hsize);
-    if (g_drive.ReadAt(vol, xbe, 0, hdr.data(), hsize) != (int64_t)hsize) {
-        return;
-    }
-    uint32_t cert = le32(&hdr[0x118]);
-    if (cert < base || (uint64_t)cert - base + 0x5C > hsize) {
-        return;
-    }
-    const uint8_t *c = &hdr[cert - base];
-    app->title_id = le32(c + 8);
-    std::string t = Utf16Le(c + 0x0C, 40);
-    while (!t.empty() && (t.back() == ' ' || t.back() == '\t')) {
-        t.pop_back();
-    }
-    if (!t.empty()) {
-        app->title = t;
-    }
-    // $$XTIMAGE section: the title image dashboards show
-    uint32_t n = le32(&hdr[0x11C]), secs = le32(&hdr[0x120]);
-    if (secs < base || n > 1024 || (uint64_t)secs - base + (uint64_t)n * 56 > hsize) {
-        return;
-    }
-    for (uint32_t i = 0; i < n; i++) {
-        const uint8_t *s = &hdr[secs - base + i * 56];
-        uint32_t raw = le32(s + 12), size = le32(s + 16), name = le32(s + 20);
-        const char want[] = "$$XTIMAGE";
-        if (name < base || (uint64_t)name - base + sizeof(want) > hsize ||
-            memcmp(&hdr[name - base], want, sizeof(want)) != 0) {
-            continue;
-        }
-        if (size && size < 4 * 1024 * 1024 && (uint64_t)raw + size <= app->xbe_size) {
-            app->title_image.resize(size);
-            if (g_drive.ReadAt(vol, xbe, raw, app->title_image.data(), size) !=
-                (int64_t)size) {
-                app->title_image.clear();
-            }
-        }
-        break;
-    }
-}
-} // namespace
 
 // ---- Game save backups -------------------------------------------------------
 
@@ -1422,12 +1282,6 @@ bool XboxExplorerBackupSaves(const std::string &host_dir, std::string *err)
     if (!g_drive.List('E', "/", &root, err)) {
         return false;
     }
-    std::error_code ec;
-    fs::create_directories(fs::u8path(host_dir), ec);
-    if (ec) {
-        *err = string_format(tr("Can't make the folder %s"), host_dir.c_str());
-        return false;
-    }
     auto job = std::make_unique<Job>();
     job->vol = 'E';
     for (const char *want : kSaveFolders) {
@@ -1447,8 +1301,15 @@ bool XboxExplorerBackupSaves(const std::string &host_dir, std::string *err)
         }
     }
     if (job->steps.empty()) {
-        fs::remove(fs::u8path(host_dir), ec);
         *err = tr("There are no game saves on this Xbox hard drive yet");
+        return false;
+    }
+    // Made only once there is something to copy, so a failed plan leaves
+    // no empty backup behind
+    std::error_code ec;
+    fs::create_directories(fs::u8path(host_dir), ec);
+    if (ec) {
+        *err = string_format(tr("Can't make the folder %s"), host_dir.c_str());
         return false;
     }
     job->title = tr("Backing up game saves");
@@ -1528,203 +1389,6 @@ bool XboxExplorerRestoreSaves(const std::string &host_dir, std::string *err)
     return true;
 }
 
-bool XboxExplorerMakeXiso(char vol, const std::string &dir,
-                          const std::string &iso_path, bool *ready,
-                          std::string *err)
-{
-    *ready = false;
-    if (g_job) {
-        *err = tr("The Xbox hard drive is busy with another copy");
-        return false;
-    }
-    if (XboxIsRunning() && g_drive.IsOpen()) {
-        Reopen(); // the running Xbox may have changed files
-    }
-    if (!EnsureOpen()) {
-        *err = g_open_err.empty() ? std::string(tr("Can't open the Xbox hard drive")) : g_open_err;
-        return false;
-    }
-    XisoNode root;
-    root.dir = true;
-    uint64_t sig = 1469598103934665603ull;
-    if (!XisoTree(vol, dir, &root, &sig, 0, err)) {
-        return false;
-    }
-    char sigs[32];
-    snprintf(sigs, sizeof(sigs), "%016llx", (unsigned long long)sig);
-    std::error_code ec;
-    if (fs::exists(fs::u8path(iso_path), ec) &&
-        ReadSmallHostFile(iso_path + ".sig") == sigs) {
-        *ready = true;
-        return true;
-    }
-    XisoPlan plan;
-    if (!XisoLayout(root, &plan, err)) {
-        return false;
-    }
-    auto job = std::make_unique<Job>();
-    job->vol = vol;
-    job->title = string_format(tr("Preparing %s"),
-                               dir.substr(dir.find_last_of('/') + 1).c_str());
-    job->iso_final = iso_path;
-    job->iso_part = iso_path + ".part";
-    job->iso_sig = sigs;
-    fs::create_directories(fs::u8path(iso_path).parent_path(), ec);
-    job->iso = OpenHost(job->iso_part, "wb+");
-    if (!job->iso) {
-        *err = string_format(tr("Can't write \"%s\""), job->iso_part.c_str());
-        return false;
-    }
-    bool ok = true;
-    for (auto &b : plan.blobs) {
-        ok = ok && SeekHost(job->iso, b.first) &&
-             fwrite(b.second.data(), 1, b.second.size(), job->iso) == b.second.size();
-    }
-    // Full size up front (the end of the image is padding)
-    ok = ok && SeekHost(job->iso, plan.image_size - 1) && fputc(0, job->iso) != EOF;
-    if (!ok) {
-        fclose(job->iso);
-        fs::remove(fs::u8path(job->iso_part), ec);
-        *err = tr("Couldn't write the disc image (is the disk full?)");
-        return false;
-    }
-    for (const XisoNode *f : plan.files) {
-        Step st{ Step::IsoFile, "", f->source, f->size };
-        st.dest = (uint64_t)f->sector * kXisoSectorSize;
-        job->steps.push_back(st);
-        job->total += f->size;
-        job->files++;
-    }
-    if (job->steps.empty()) {
-        // Nothing but empty files: done already
-        Step st{ Step::IsoFile, "", "", 0 };
-        job->steps.push_back(st);
-    }
-    StartJob(std::move(job));
-    return g_job != nullptr;
-}
-
-bool XboxExplorerDeleteFolder(char vol, const std::string &dir,
-                              const std::string &title, std::string *err)
-{
-    if (g_job) {
-        *err = tr("The Xbox hard drive is busy with another copy");
-        return false;
-    }
-    if (XboxIsRunning() && g_drive.IsOpen()) {
-        Reopen();
-    }
-    if (!EnsureOpen()) {
-        *err = g_open_err.empty() ? std::string(tr("Can't open the Xbox hard drive")) : g_open_err;
-        return false;
-    }
-    if (!XboxDiskEmulatedWritable()) {
-        *err = tr("The hard disk image is read-only");
-        return false;
-    }
-    XboxFileInfo fi;
-    if (dir.empty() || dir == "/" || !g_drive.Stat(vol, dir, &fi) || !fi.dir) {
-        *err = tr("It's no longer on the drive");
-        return false;
-    }
-    auto job = std::make_unique<Job>();
-    job->writes = true;
-    job->vol = vol;
-    job->title = string_format(tr("Deleting %s"), title.c_str());
-    if (!DeleteSteps(vol, dir, fi, job.get(), err)) {
-        return false;
-    }
-    StartJob(std::move(job));
-    if (!g_job) {
-        *err = g_status;
-        return false;
-    }
-    return true;
-}
-
-bool XboxExplorerFindHomebrew(std::vector<XboxHomebrewApp> *out, std::string *err)
-{
-    out->clear();
-    if (g_job) {
-        *err = tr("The Xbox hard drive is busy");
-        return false;
-    }
-    if (XboxIsRunning() && g_drive.IsOpen()) {
-        Reopen();
-    }
-    if (!EnsureOpen()) {
-        *err = g_open_err.empty() ? std::string(tr("Can't open the Xbox hard drive")) : g_open_err;
-        return false;
-    }
-    static const char *const kSections[] = { "Games", "Apps", "Emulators" };
-    for (char vol : { 'E', 'F' }) {
-        if (!g_drive.Volume(vol)) {
-            continue;
-        }
-        std::vector<XboxFileInfo> top;
-        std::string e;
-        if (!g_drive.List(vol, "/", &top, &e)) {
-            continue;
-        }
-        for (auto &t : top) {
-            const char *section = nullptr;
-            for (const char *s : kSections) {
-                std::string a = t.name, b = s;
-                std::transform(a.begin(), a.end(), a.begin(), ::tolower);
-                std::transform(b.begin(), b.end(), b.begin(), ::tolower);
-                if (t.dir && a == b) {
-                    section = s;
-                }
-            }
-            if (!section) {
-                continue;
-            }
-            std::vector<XboxFileInfo> apps;
-            if (!g_drive.List(vol, "/" + t.name, &apps, &e)) {
-                continue;
-            }
-            for (auto &a : apps) {
-                if (!a.dir) {
-                    continue;
-                }
-                XboxHomebrewApp app;
-                app.vol = vol;
-                app.dir = "/" + t.name + "/" + a.name;
-                app.folder = a.name;
-                app.section = section;
-                app.installed = (int64_t)a.modified;
-                app.title = a.name;
-                // default.xbe, whatever its case
-                std::vector<XboxFileInfo> files;
-                std::string xbe;
-                if (g_drive.List(vol, app.dir, &files, &e)) {
-                    for (auto &f : files) {
-                        std::string n = f.name;
-                        std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-                        if (!f.dir && n == "default.xbe") {
-                            xbe = XboxJoin(app.dir, f.name);
-                            app.xbe_size = f.size;
-                        }
-                    }
-                }
-                if (xbe.empty()) {
-                    continue;
-                }
-                ReadXbeTitle(vol, xbe, &app);
-                out->push_back(app);
-            }
-        }
-    }
-    std::sort(out->begin(), out->end(),
-              [](const XboxHomebrewApp &a, const XboxHomebrewApp &b) {
-                  std::string x = a.title, y = b.title;
-                  std::transform(x.begin(), x.end(), x.begin(), ::tolower);
-                  std::transform(y.begin(), y.end(), y.begin(), ::tolower);
-                  return x < y;
-              });
-    return true;
-}
-
 std::string XboxExplorerStatus(bool *is_error)
 {
     if (is_error) {
@@ -1755,7 +1419,8 @@ void XboxExplorerDraw(void)
         ImGui::PopID();
         return;
     }
-    // Free space of the current drive, counted once per opening
+    // Free space of the current drive, counted once (kept across reopens
+    // until a write or Refresh)
     const XboxVolume *v = g_drive.Volume(g_vol);
     if (v && !v->free_known && !g_job && ImGui::GetFrameCount() > 1) {
         g_drive.UpdateFreeSpace(g_vol);
@@ -1778,6 +1443,12 @@ void XboxExplorerOpenWindow(void)
 void XboxExplorerWindowDraw(void)
 {
     if (!g_window_open) {
+        // Closed: let go of the drive, under the BQL (a job keeps it open
+        // until it ends)
+        if (g_drive.IsOpen() && !g_job) {
+            g_drive.Close();
+            g_open_tried = 0;
+        }
         return;
     }
     const float s = g_viewport_mgr.m_scale;

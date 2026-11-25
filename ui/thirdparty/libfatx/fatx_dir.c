@@ -21,6 +21,14 @@
 #include <time.h>
 #include <stdlib.h>
 
+/* xemu: start the cycle check at dir->cluster (see fatx_next_dir_entry) */
+static void fatx_dir_loop_reset(struct fatx_dir *dir)
+{
+    dir->loop_mark  = dir->cluster;
+    dir->loop_len   = 0;
+    dir->loop_power = 1;
+}
+
 /*
  * Open a directory.
  */
@@ -44,9 +52,12 @@ int fatx_open_dir(struct fatx_fs *fs, char const *path, struct fatx_dir *dir)
 
     dir->cluster = fs->root_cluster;
     dir->entry   = 0;
+    fatx_dir_loop_reset(dir);
 
     for (component=1; 1; component++)
     {
+        size_t name_len;
+
         fatx_spew(fs, "checking component %zd in path %s\n", component, path);
 
         /* Get the next path component. */
@@ -63,6 +74,14 @@ int fatx_open_dir(struct fatx_fs *fs, char const *path, struct fatx_dir *dir)
              * been set and the path has been found.
              */
             break;
+        }
+
+        /* xemu: the component's name, without its trailing '/' or NUL */
+        name_len = len;
+        if (name_len && (start[name_len-1] == FATX_PATH_SEPERATOR ||
+                         start[name_len-1] == '\0'))
+        {
+            name_len -= 1;
         }
 
         /* Iterate over the directory entries in this directory, looking for the
@@ -102,26 +121,24 @@ int fatx_open_dir(struct fatx_fs *fs, char const *path, struct fatx_dir *dir)
                 goto continue_to_next_entry;
             }
 
-            /* Trim trailing slash, if present. */
-            if (start[len-1] == FATX_PATH_SEPERATOR)
-            {
-                len -= 1;
-            }
-
-            /* Compare the path component to this directory entry. */
-            if (memcmp(dirent.filename, start, len) == 0)
+            /* Compare the path component to this directory entry (xemu: the
+             * whole name; "Halo" matched "Halo 2" before) */
+            if (strlen(dirent.filename) == name_len &&
+                memcmp(dirent.filename, start, name_len) == 0)
             {
                 /* Path found. */
                 dir->cluster = attr.first_cluster;
                 dir->entry = 0;
+                fatx_dir_loop_reset(dir);
                 break;
             }
 
             continue_to_next_entry:
 
-            /* Get the next directory entry. */
+            /* Get the next directory entry (xemu: a walk that can't go on
+             * fails the lookup, rather than going on from the wrong folder) */
             status = fatx_next_dir_entry(fs, dir);
-            if (status != FATX_STATUS_SUCCESS) break;
+            if (status != FATX_STATUS_SUCCESS) return status;
         }
     }
 
@@ -155,6 +172,20 @@ int fatx_next_dir_entry(struct fatx_fs *fs, struct fatx_dir *dir)
     switch (fatx_get_fat_entry_type(fs, fat_entry))
     {
     case FATX_CLUSTER_DATA:
+        /* xemu: a chain that comes back to a cluster loops (a damaged
+         * disk). Brent's check: compare each hop with a mark that moves on
+         * after 1, 2, 4... hops, so a loop ends within a few laps. */
+        if (fat_entry == dir->loop_mark)
+        {
+            fatx_error(fs, "directory cluster chain loops\n");
+            return FATX_STATUS_ERROR;
+        }
+        if (++dir->loop_len == dir->loop_power)
+        {
+            dir->loop_mark  = fat_entry;
+            dir->loop_len   = 0;
+            dir->loop_power *= 2;
+        }
         dir->cluster = fat_entry;
         dir->entry = 0;
         fatx_info(fs, "found additional directory entries at cluster %zd\n", dir->cluster);
@@ -222,9 +253,11 @@ int fatx_read_dir(struct fatx_fs *fs, struct fatx_dir *dir, struct fatx_dirent *
 
     fatx_debug(fs, "dirent %zd of cluster %zd data starts at %08x\n", dir->entry, dir->cluster, directory_entry.first_cluster);
 
-    /* Copy filename. */
-    memcpy(entry->filename, directory_entry.filename, directory_entry.filename_len);
-    entry->filename[directory_entry.filename_len] = '\0';
+    /* Copy filename (xemu: at most the 42 bytes the entry holds; a damaged
+     * entry's length overflowed both buffers) */
+    size_t filename_len = MIN(directory_entry.filename_len, FATX_MAX_FILENAME_LEN);
+    memcpy(entry->filename, directory_entry.filename, filename_len);
+    entry->filename[filename_len] = '\0';
 
     /* Populate attributes. */
     if (attr != NULL)
@@ -311,11 +344,13 @@ int fatx_alloc_dir_entry(struct fatx_fs *fs, struct fatx_dir *dir)
     struct fatx_attr attr;
     int status;
     size_t new_cluster, cur_cluster, cur_entry;
+    size_t per_cluster = fs->bytes_per_cluster/sizeof(struct fatx_raw_directory_entry);
 
     fatx_debug(fs, "fatx_alloc_dir_entry()\n");
 
     /* Scan directory entries for deleted files */
     dir->entry = 0;
+    fatx_dir_loop_reset(dir);
     while (1)
     {
         status = fatx_read_dir(fs, dir, &entry, &attr, &result);
@@ -346,8 +381,10 @@ int fatx_alloc_dir_entry(struct fatx_fs *fs, struct fatx_dir *dir)
         }
     }
 
-    /* If we have more space in the current cluster, then shift the end of file marker */
-    if (dir->entry < fs->bytes_per_cluster/sizeof(struct fatx_raw_directory_entry))
+    /* If we have more space in the current cluster, then shift the end of file marker
+     * (xemu: only if the next slot is in this cluster; the one past its end
+     * is the next cluster on the disk, which this used to overwrite) */
+    if (dir->entry + 1 < per_cluster)
     {
         dir->entry += 1;
         status = fatx_mark_end_of_dir(fs, dir);
@@ -363,13 +400,29 @@ int fatx_alloc_dir_entry(struct fatx_fs *fs, struct fatx_dir *dir)
     if (status) return status;
 
     status = fatx_attach_cluster(fs, dir->cluster, new_cluster);
-    if (status) return status;
+    if (status)
+    {
+        /* xemu: e.g. a looped chain has no tail; don't leak the cluster */
+        fatx_free_cluster_chain(fs, new_cluster);
+        return status;
+    }
 
     /* Mark first element in new cluster as end of dir */
     cur_cluster  = dir->cluster;
     dir->cluster = new_cluster;
     cur_entry    = dir->entry;
     dir->entry   = 0;
+
+    /* xemu: the old cluster is full with no end marker (cur_entry is past
+     * its last slot): the entry goes first in the new cluster */
+    if (cur_entry >= per_cluster)
+    {
+        dir->entry = 1;
+        status = fatx_mark_end_of_dir(fs, dir);
+        if (status) return status;
+        dir->entry = 0;
+        return FATX_STATUS_SUCCESS;
+    }
 
     status = fatx_mark_end_of_dir(fs, dir);
     if (status) return status;
@@ -468,9 +521,9 @@ int fatx_create_dirent(struct fatx_fs *fs, char const *path, struct fatx_dir *di
     size_t cluster;
     time_t curtime;
 
-    /* Check basename is not too long */
+    /* Check basename is not too long (xemu: 42 bytes fit; was >=) */
     path_basename = fatx_basename(path);
-    if (strlen(path_basename) >= FATX_MAX_FILENAME_LEN)
+    if (strlen(path_basename) > FATX_MAX_FILENAME_LEN)
     {
         free(path_basename);
         fatx_error(fs, "filename is too long\n");

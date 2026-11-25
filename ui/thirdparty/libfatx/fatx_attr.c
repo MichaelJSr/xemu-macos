@@ -25,8 +25,10 @@
  */
 int fatx_dirent_to_attr(struct fatx_fs *fs, struct fatx_raw_directory_entry *entry, struct fatx_attr *attr)
 {
-    memcpy(attr->filename, entry->filename, entry->filename_len);
-    attr->filename[entry->filename_len] = '\0';
+    /* xemu: at most the 42 bytes the entry holds */
+    size_t filename_len = MIN(entry->filename_len, FATX_MAX_FILENAME_LEN);
+    memcpy(attr->filename, entry->filename, filename_len);
+    attr->filename[filename_len] = '\0';
 
     attr->attributes    = entry->attributes;
     attr->first_cluster = entry->first_cluster;

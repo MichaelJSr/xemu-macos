@@ -103,11 +103,19 @@ struct fatx_fs {
     int             (*io_read)(void *opaque, uint64_t offset, void *buf, size_t len);
     int             (*io_write)(void *opaque, uint64_t offset, const void *buf, size_t len);
     uint64_t          io_pos;
+
+    /* xemu: where fatx_alloc_cluster() looks first, per volume */
+    size_t            alloc_hint;
 };
 
 struct fatx_dir {
     size_t cluster;
     size_t entry;
+
+    /* xemu: cycle check on the directory's cluster chain */
+    size_t loop_mark;
+    size_t loop_len;
+    size_t loop_power;
 };
 
 struct fatx_ts {

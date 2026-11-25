@@ -17,4 +17,19 @@ bool XboxDiskEmulatedWritable(void);
 // and it is restarted afterwards
 bool XboxIsRunning(void);
 void XboxPause(void);
-void XboxRestart(void);
+void XboxResume(void);
+// Reset the Xbox (while stopped), then start it if resume
+void XboxRestart(bool resume);
+// Disk writes so far: whether an operation changed the disk
+uint64_t XboxDiskWriteCount(void);
+
+// Around a write job that runs over several frames: snapshot saves are
+// refused and a resume is undone before the Xbox runs
+void XboxJobBegin(void);
+void XboxJobEnd(void);
+// Whether a resume was undone since the last call
+bool XboxTakeResumeRefused(void);
+// Snapshot loads so far (each reverts the disk under an open drive)
+unsigned XboxSnapshotLoads(void);
+// fn runs at shutdown, while the disk can still be written
+void XboxOnShutdown(void (*fn)(void));

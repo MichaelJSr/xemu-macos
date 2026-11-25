@@ -416,13 +416,20 @@ int fatx_alloc_cluster(struct fatx_fs *fs, size_t *cluster, bool zero)
 {
     int status;
     fatx_fat_entry fat_entry;
-    static size_t i = 2;
+    /* xemu: the hint is per volume. A static shared by volumes of
+     * different sizes could start past this one's end, and then a full
+     * volume never got back to start_i. */
+    size_t i = fs->alloc_hint;
     size_t start_i;
     bool wrapped;
     void *zero_buf;
 
     fatx_debug(fs, "fatx_alloc_cluster(zero: %s)\n", zero ? "true" : "false");
 
+    if (i < 2 || i >= fs->num_clusters)
+    {
+        i = 2;
+    }
     start_i = i;
     wrapped = false;
 
@@ -455,6 +462,7 @@ int fatx_alloc_cluster(struct fatx_fs *fs, size_t *cluster, bool zero)
             break;
         }
     }
+    fs->alloc_hint = i;
 
     status = fatx_mark_cluster_end(fs, i);
     if (status != FATX_STATUS_SUCCESS) return status;

@@ -8,6 +8,7 @@
 //
 #include "xbox-drive.hh"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,60 +19,11 @@
 // C-only, so these are declared here)
 extern "C" {
 int fatx_flush_fat_cache(struct fatx_fs *fs);
-int fatx_read_fat(struct fatx_fs *fs, size_t index, uint32_t *entry);
-int fatx_get_fat_entry_type(struct fatx_fs *fs, uint32_t entry);
 }
-static const int kFatxClusterAvailable = 0; // FATX_CLUSTER_AVAILABLE
-
-// ---- Raw image files -----------------------------------------------------
+static const int kFatxFatType16 = 1; // FATX_FAT_TYPE_16
 
 namespace
 {
-class FileDiskIO : public XboxDiskIO
-{
-public:
-    explicit FileDiskIO(FILE *f) : m_f(f)
-    {
-    }
-    ~FileDiskIO() override
-    {
-        fclose(m_f);
-    }
-    bool Seek(uint64_t off)
-    {
-#ifdef _WIN32
-        return _fseeki64(m_f, (int64_t)off, SEEK_SET) == 0;
-#else
-        return fseeko(m_f, (off_t)off, SEEK_SET) == 0;
-#endif
-    }
-    bool Read(uint64_t off, void *buf, size_t len) override
-    {
-        return Seek(off) && fread(buf, 1, len, m_f) == len;
-    }
-    bool Write(uint64_t off, const void *buf, size_t len) override
-    {
-        return Seek(off) && fwrite(buf, 1, len, m_f) == len;
-    }
-    uint64_t Size() override
-    {
-#ifdef _WIN32
-        _fseeki64(m_f, 0, SEEK_END);
-        return (uint64_t)_ftelli64(m_f);
-#else
-        fseeko(m_f, 0, SEEK_END);
-        return (uint64_t)ftello(m_f);
-#endif
-    }
-    void Flush() override
-    {
-        fflush(m_f);
-    }
-
-private:
-    FILE *m_f;
-};
-
 int IoRead(void *opaque, uint64_t offset, void *buf, size_t len)
 {
     return static_cast<XboxDiskIO *>(opaque)->Read(offset, buf, len) ? 0 : -1;
@@ -83,15 +35,6 @@ int IoWrite(void *opaque, uint64_t offset, const void *buf, size_t len)
 }
 
 } // namespace
-
-std::unique_ptr<XboxDiskIO> XboxDiskOpenFile(const std::string &path)
-{
-    FILE *f = fopen(path.c_str(), "r+b");
-    if (!f) {
-        return nullptr;
-    }
-    return std::make_unique<FileDiskIO>(f);
-}
 
 // ---- Names and paths -----------------------------------------------------
 
@@ -148,7 +91,9 @@ XboxDrive::XboxDrive() = default;
 
 XboxDrive::~XboxDrive()
 {
-    Close();
+    // A static's destructor runs after QEMU has closed the block layer, so
+    // write nothing here (the explorer closes the drive at shutdown)
+    Discard();
 }
 
 bool XboxDrive::Open(std::unique_ptr<XboxDiskIO> io, std::string *err)
@@ -220,6 +165,17 @@ void XboxDrive::Close()
     if (m_io) {
         m_io->Flush();
     }
+    m_io.reset();
+}
+
+void XboxDrive::Discard()
+{
+    for (auto &v : m_vols) {
+        free(v->fs.fat_cache.data); // dropped unwritten
+        v->fs.fat_cache.data = nullptr;
+    }
+    m_vols.clear();
+    m_volumes.clear();
     m_io.reset();
 }
 
@@ -451,23 +407,45 @@ bool XboxDrive::Rename(char vol, const std::string &from, const std::string &to,
 void XboxDrive::UpdateFreeSpace(char vol)
 {
     Vol *v = Find(vol);
-    if (!v) {
+    if (!v || fatx_flush_fat_cache(&v->fs)) {
         return;
     }
+    // Count the zero (free) entries of the FAT, read in large blocks: one
+    // libfatx call per entry took a block read per 512 entries, under the
+    // BQL
+    size_t es = v->fs.fat_type == kFatxFatType16 ? 2 : 4;
+    std::vector<uint8_t> buf(1 << 20);
     uint64_t free_clusters = 0;
-    for (size_t i = 1; i < v->fs.num_clusters; i++) {
-        uint32_t e;
-        if (fatx_read_fat(&v->fs, i, &e)) {
+    for (size_t i = 1; i < v->fs.num_clusters;) {
+        size_t n = std::min<size_t>(buf.size() / es, v->fs.num_clusters - i);
+        if (!m_io->Read(v->fs.fat_offset + (uint64_t)i * es, buf.data(), n * es)) {
             return;
         }
-        if (fatx_get_fat_entry_type(&v->fs, e) == kFatxClusterAvailable) {
-            free_clusters++;
+        for (size_t k = 0; k < n * es; k += es) {
+            uint32_t any = 0;
+            for (size_t b = 0; b < es; b++) {
+                any |= buf[k + b];
+            }
+            free_clusters += any == 0;
         }
+        i += n;
     }
     for (auto &info : m_volumes) {
         if (info.letter == vol) {
             info.free = free_clusters * v->fs.bytes_per_cluster;
             info.free_known = true;
+        }
+    }
+}
+
+void XboxDrive::KeepFreeSpace(const std::vector<XboxVolume> &before)
+{
+    for (auto &info : m_volumes) {
+        for (auto &b : before) {
+            if (b.letter == info.letter && b.free_known) {
+                info.free = b.free;
+                info.free_known = true;
+            }
         }
     }
 }

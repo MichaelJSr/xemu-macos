@@ -3,8 +3,7 @@
 //
 // Reads and writes files on the emulated Xbox hard drive's FATX partitions
 // (C, E, F, X, Y, Z) using libfatx. The disk itself is reached through an
-// XboxDiskIO: in xemu that is QEMU's block layer (so qcow2 images work), in
-// tests a raw image file.
+// XboxDiskIO: QEMU's block layer (so qcow2 images work).
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -29,9 +28,6 @@ public:
     {
     }
 };
-
-// A raw disk image file (used by tests)
-std::unique_ptr<XboxDiskIO> XboxDiskOpenFile(const std::string &path);
 
 struct XboxVolume {
     char letter;          // 'C', 'E', ...
@@ -60,6 +56,9 @@ public:
     // Find the FATX partitions on the disk
     bool Open(std::unique_ptr<XboxDiskIO> io, std::string *err);
     void Close();
+    // Close without writing cached FAT changes (the disk changed under us,
+    // or the block layer is gone)
+    void Discard();
     bool IsOpen() const
     {
         return m_io != nullptr;
@@ -89,6 +88,8 @@ public:
 
     // Count free space (scans the FAT; cached until the next write)
     void UpdateFreeSpace(char vol);
+    // Take the free space counted before a reopen
+    void KeepFreeSpace(const std::vector<XboxVolume> &before);
     // Write cached FAT changes to the disk
     void Flush();
 

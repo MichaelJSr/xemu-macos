@@ -57,7 +57,42 @@ void XboxPause(void)
     xemu_xbox_pause();
 }
 
-void XboxRestart(void)
+void XboxResume(void)
 {
-    xemu_xbox_restart();
+    xemu_xbox_resume();
+}
+
+void XboxRestart(bool resume)
+{
+    xemu_xbox_restart(resume);
+}
+
+uint64_t XboxDiskWriteCount(void)
+{
+    return xemu_hdd_write_count();
+}
+
+void XboxJobBegin(void)
+{
+    xemu_hdd_job_begin();
+}
+
+void XboxJobEnd(void)
+{
+    xemu_hdd_job_end();
+}
+
+bool XboxTakeResumeRefused(void)
+{
+    return xemu_hdd_take_resume_refused();
+}
+
+unsigned XboxSnapshotLoads(void)
+{
+    return xemu_hdd_snapshot_loads();
+}
+
+void XboxOnShutdown(void (*fn)(void))
+{
+    xemu_hdd_on_shutdown(fn);
 }

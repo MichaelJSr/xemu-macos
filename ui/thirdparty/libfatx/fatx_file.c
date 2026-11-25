@@ -426,8 +426,9 @@ int fatx_rename(struct fatx_fs *fs, char const *from, char const *to, bool excha
     path_dif = strcmp(from_dirname, to_dirname);
 
     /* Check that the new filename is not too long */
+    /* (xemu: 42 bytes fit; these were >=) */
     to_basename = fatx_basename(to);
-    if (strlen(to_basename) >= FATX_MAX_FILENAME_LEN)
+    if (strlen(to_basename) > FATX_MAX_FILENAME_LEN)
     {
         fatx_error(fs, "destination name too long\n");
         status = FATX_STATUS_ERROR;
@@ -435,7 +436,7 @@ int fatx_rename(struct fatx_fs *fs, char const *from, char const *to, bool excha
     }
 
     from_basename = fatx_basename(from);
-    if (strlen(from_basename) >= FATX_MAX_FILENAME_LEN)
+    if (strlen(from_basename) > FATX_MAX_FILENAME_LEN)
     {
         fatx_error(fs, "source name too long\n");
         status = FATX_STATUS_ERROR;
