@@ -51,7 +51,9 @@ About 15 min of local time on the release commit, before the tag:
    release legs only, so a break in debug-only code that only macOS or
    Windows compiles would otherwise first show at the tag and block the
    draft. It runs beside the steps below and must be green before the
-   tag.
+   tag. Dispatch it after the push run's Roswell legs finish: xemu-test's
+   Roswell workflow keeps one run per branch and cancels the older one
+   (its full-run twin covers the same tests).
 2. Download the push run's universal zip (`gh run download <id> --repo
    MichaelJSr/xemu-macos -n xemu-macos-universal-release`) and the
    previous release's (`gh release download vA.B.C --repo
